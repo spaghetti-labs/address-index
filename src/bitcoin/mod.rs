@@ -1,3 +1,5 @@
+use bigdecimal::num_bigint;
+
 use crate::jsonrpc1::RpcClient;
 
 pub struct BitcoinRpcClient {
@@ -18,6 +20,10 @@ impl BitcoinRpcClient {
   pub async fn getblockhash(&self, block_height: u64) -> anyhow::Result<BlockHash> {
     self.rpc_client.request("getblockhash", (block_height,)).await
   }
+
+  pub async fn getblock(&self, block_hash: BlockHash) -> anyhow::Result<Block> {
+    self.rpc_client.request("getblock", (block_hash, 2u8 /* verbosity: 2 */)).await
+  }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -26,32 +32,107 @@ pub struct BlockchainInfo {
   pub blocks: u64,
 }
 
-pub struct BlockHash([u8; 32]);
-
-impl BlockHash {
-  pub fn from_hex(s: &str) -> anyhow::Result<Self> {
-    let bytes = hex::decode(s)?;
-    if bytes.len() != 32 {
-      return Err(anyhow::anyhow!("Invalid block hash length"));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(Self(arr))
-  }
+#[derive(Debug, serde::Deserialize)]
+pub struct Block {
+  pub hash: BlockHash,
+  pub height: u64,
+  pub time: u64,
+  pub tx: Vec<Transaction>,
 }
 
-impl std::fmt::Debug for BlockHash {
+#[derive(Debug, serde::Deserialize)]
+pub struct Transaction {
+  pub fee: Option<Amount>,
+  pub txid: TransactionID,
+  pub vin: Vec<TxInput>,
+  pub vout: Vec<TxOutput>,
+}
+
+pub type BlockHash = Hex<[u8; 32]>;
+pub type TransactionID = Hex<[u8; 32]>;
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+pub enum TxInput {
+  Coinbase { coinbase: Hex<Vec<u8>> },
+  Normal { txid: TransactionID, vout: u32 },
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct TxOutput {
+  pub value: Amount,
+  pub n: u32,
+  pub scriptPubKey: ScriptPubKey,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ScriptPubKey {
+  #[serde(rename = "type")]
+  pub script_type: String,
+  pub address: Option<String>,
+}
+
+pub struct Hex<T>(T);
+
+impl<T: AsRef<[u8]>> std::fmt::Debug for Hex<T> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "{}", hex::encode(self.0))
+    write!(f, "{}", hex::encode(self.0.as_ref()))
   }
 }
 
-impl<'de> serde::Deserialize<'de> for BlockHash {
+impl<T: AsRef<[u8]>> serde::Serialize for Hex<T> {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: serde::Serializer,
+  {
+    let hex_str = hex::encode(self.0.as_ref());
+    serializer.serialize_str(&hex_str)
+  }
+}
+
+impl<'de, const SIZE: usize> serde::Deserialize<'de> for Hex<[u8; SIZE]> {
   fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
   where
     D: serde::Deserializer<'de>,
   {
     let s = String::deserialize(deserializer)?;
-    BlockHash::from_hex(&s).map_err(serde::de::Error::custom)
+    let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
+    if bytes.len() != SIZE {
+      return Err(serde::de::Error::custom(format!("Invalid hex length, expected {}, got {}", SIZE, bytes.len())));
+    }
+    let mut arr = [0u8; SIZE];
+    arr.copy_from_slice(&bytes);
+    Ok(Self(arr))
+  }
+}
+
+impl<'de> serde::Deserialize<'de> for Hex<Vec<u8>> {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    let s = String::deserialize(deserializer)?;
+    let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
+    Ok(Self(bytes))
+  }
+}
+
+#[derive(Debug)]
+pub struct Amount {
+  pub satoshis: u64,
+}
+
+impl<'de> serde::Deserialize<'de> for Amount {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    let btc = bigdecimal::BigDecimal::deserialize(deserializer)?;
+    if btc.sign() == num_bigint::Sign::Minus {
+      return Err(serde::de::Error::custom("Negative amount"));
+    }
+    let (satoshis, _) = btc.with_scale(8).into_bigint_and_scale();
+    let satoshis: u64 = satoshis.try_into().map_err(|_| serde::de::Error::custom("Amount too large"))?;
+    Ok(Amount { satoshis })
   }
 }

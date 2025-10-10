@@ -24,5 +24,8 @@ async fn main() -> anyhow::Result<()> {
   let last_block_hash = bitcoin_rpc_client.getblockhash(blockchain_info.blocks).await?;
   println!("Last block hash: {:?}", last_block_hash);
 
+  let last_block = bitcoin_rpc_client.getblock(last_block_hash).await?;
+  println!("Last block: {:?}", last_block);
+
   Ok(())
 }

@@ -1,0 +1,15 @@
+[package]
+name = "scanner"
+version = "0.1.0"
+authors = ["M. Ali AKBAY <ali.akbay@spaghetti.labs>"]
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+redis = { version = "0.32", features = ["aio", "tokio-comp"] }
+clap = { version = "4.5.48", features = ["derive", "env"] }
+jsonrpsee = { version = "0.26.0", features = ["async-client", "http-client", "macros", "tokio"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+reqwest = { version = "0.12.23", features = ["json"] }

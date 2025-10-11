@@ -1,3 +1,6 @@
+# Local
+/local/
+
 # Rust / Cargo
 /target
 **/*.rs.bk

@@ -1,3 +1,5 @@
+use core::fmt;
+
 use bigdecimal::num_bigint;
 
 use crate::jsonrpc1::RpcClient;
@@ -22,7 +24,7 @@ impl BitcoinRpcClient {
   }
 
   pub async fn getblock(&self, block_hash: BlockHash) -> anyhow::Result<Block> {
-    self.rpc_client.request("getblock", (block_hash, 2u8 /* verbosity: 2 */)).await
+    self.rpc_client.request("getblock", (block_hash, /* verbosity: */ 2u8)).await
   }
 }
 
@@ -35,6 +37,8 @@ pub struct BlockchainInfo {
 #[derive(Debug, serde::Deserialize)]
 pub struct Block {
   pub hash: BlockHash,
+  pub previousblockhash: Option<BlockHash>,
+  pub nextblockhash: Option<BlockHash>,
   pub height: u64,
   pub time: u64,
   pub tx: Vec<Transaction>,
@@ -72,7 +76,8 @@ pub struct ScriptPubKey {
   pub address: Option<String>,
 }
 
-pub struct Hex<T>(T);
+#[derive(Clone)]
+pub struct Hex<T>(pub T);
 
 impl<T: AsRef<[u8]>> std::fmt::Debug for Hex<T> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

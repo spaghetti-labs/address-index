@@ -1,5 +1,7 @@
 mod bitcoin;
 mod jsonrpc1;
+mod store;
+mod scanner;
 
 use clap::Parser;
 
@@ -8,6 +10,9 @@ use clap::Parser;
 struct Args {
   #[arg(long = "rpc-url", env = "RPC_URL")]
   rpc_url: String,
+
+  #[arg(long = "data-dir", env = "DATA_DIR")]
+  data_dir: String,
 }
 
 #[tokio::main]
@@ -21,11 +26,11 @@ async fn main() -> anyhow::Result<()> {
   let blockchain_info = bitcoin_rpc_client.getblockchaininfo().await?;
   println!("Blockchain info: {:?}", blockchain_info);
 
-  let last_block_hash = bitcoin_rpc_client.getblockhash(blockchain_info.blocks).await?;
-  println!("Last block hash: {:?}", last_block_hash);
+  let store = store::Store::open(&args.data_dir)?;
 
-  let last_block = bitcoin_rpc_client.getblock(last_block_hash).await?;
-  println!("Last block: {:?}", last_block);
+  let scanner = scanner::Scanner::open(bitcoin_rpc_client, store)?;
+
+  scanner.scan().await?;
 
   Ok(())
 }

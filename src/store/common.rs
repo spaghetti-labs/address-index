@@ -45,6 +45,17 @@ macro_rules! impl_primitive_conversion {
   };
 }
 
+#[macro_export]
+macro_rules! impl_hex_debug {
+  ($type:ty, $field_name:ident) => {
+    impl std::fmt::Debug for $type {
+      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex::encode(self.$field_name))
+      }
+    }
+  };
+}
+
 #[derive(Debug, bincode::Encode, bincode::Decode)]
 pub struct BlockHeight {
   pub height: u64,
@@ -52,38 +63,42 @@ pub struct BlockHeight {
 impl_bincode_conversion!(BlockHeight);
 impl_primitive_conversion!(BlockHeight, u64, height);
 
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(Debug, bincode::Encode, bincode::Decode, Clone, Copy)]
 pub struct Amount {
   pub satoshis: u64,
 }
 impl_bincode_conversion!(Amount);
 impl_primitive_conversion!(Amount, u64, satoshis);
 
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(bincode::Encode, bincode::Decode)]
 pub struct BlockHash {
   pub bytes: [u8; 32],
 }
 impl_bincode_conversion!(BlockHash);
 impl_primitive_conversion!(BlockHash, [u8; 32], bytes);
+impl_hex_debug!(BlockHash, bytes);
 
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(bincode::Encode, bincode::Decode)]
 pub struct ScriptPubKey {
   pub bytes: [u8; 67],
 }
 impl_bincode_conversion!(ScriptPubKey);
 impl_primitive_conversion!(ScriptPubKey, [u8; 67], bytes);
+impl_hex_debug!(ScriptPubKey, bytes);
 
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(bincode::Encode, bincode::Decode)]
 pub struct ScriptPubKeyHash {
   pub bytes: [u8; 20],
 }
 impl_bincode_conversion!(ScriptPubKeyHash);
 impl_primitive_conversion!(ScriptPubKeyHash, [u8; 20], bytes);
+impl_hex_debug!(ScriptPubKeyHash, bytes);
 
 
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(bincode::Encode, bincode::Decode, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct TransactionID {
   pub bytes: [u8; 32],
 }
 impl_bincode_conversion!(TransactionID);
 impl_primitive_conversion!(TransactionID, [u8; 32], bytes);
+impl_hex_debug!(TransactionID, bytes);

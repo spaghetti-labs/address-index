@@ -1,6 +1,7 @@
 pub mod block;
-pub mod utxo;
+pub mod txo;
 pub mod common;
+pub mod address;
 
 pub struct Store {
   keyspace: fjall::Keyspace,
@@ -18,9 +19,15 @@ impl Store {
     })
   }
 
-  pub fn utxo_store(&self) -> anyhow::Result<utxo::UTXOStore> {
-    Ok(utxo::UTXOStore {
-      partition: self.keyspace.open_partition("utxo", fjall::PartitionCreateOptions::default())?,
+  pub fn txo_store(&self) -> anyhow::Result<txo::TXOStore> {
+    Ok(txo::TXOStore {
+      partition: self.keyspace.open_partition("txo", fjall::PartitionCreateOptions::default())?,
+    })
+  }
+
+  pub fn address_store(&self) -> anyhow::Result<address::AddressStore> {
+    Ok(address::AddressStore {
+      partition: self.keyspace.open_partition("address", fjall::PartitionCreateOptions::default())?,
     })
   }
 

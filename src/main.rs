@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
 
   let scanner = scanner::Scanner::open(bitcoin_rpc_client, store)?;
 
-  scanner.scan(args.start_height).await?;
+  scanner.scan_blocks(args.start_height).await?;
 
   Ok(())
 }

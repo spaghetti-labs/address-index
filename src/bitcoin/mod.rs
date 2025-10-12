@@ -44,7 +44,6 @@ pub struct Block {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct Transaction {
-  pub fee: Option<Amount>,
   pub txid: TransactionID,
   pub vin: Vec<TxInput>,
   pub vout: Vec<TxOutput>,

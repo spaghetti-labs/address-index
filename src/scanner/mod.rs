@@ -1,15 +1,16 @@
-use std::time::Duration;
+use std::{collections::btree_map, time::Duration};
 
 use bitcoin_hashes::{Hash160, Sha256};
 use tokio::time::sleep;
 
-use crate::{bitcoin::{self, ScriptPubKey, TxOutput}, store};
+use crate::{bitcoin::{self, ScriptPubKey, TxOutput}, store::{self, address::AddressState, txo}};
 
 pub struct Scanner {
   bitcoin_rpc: bitcoin::BitcoinRpcClient,
   store: store::Store,
   block_store: store::block::BlockStore,
-  utxo_store: store::utxo::UTXOStore,
+  txo_store: store::txo::TXOStore,
+  address_store: store::address::AddressStore,
 }
 
 #[derive(Debug)]
@@ -24,12 +25,14 @@ impl Scanner {
     store: store::Store,
   ) -> anyhow::Result<Self> {
     let block_store = store.block_store()?;
-    let utxo_store = store.utxo_store()?;
+    let txo_store = store.txo_store()?;
+    let address_store = store.address_store()?;
     Ok(Self {
       bitcoin_rpc,
       store,
       block_store,
-      utxo_store,
+      txo_store,
+      address_store,
     })
   }
 
@@ -61,7 +64,7 @@ impl Scanner {
     Ok(block)
   }
 
-  pub async fn scan(&self, start_height: u64) -> anyhow::Result<()> {
+  pub async fn scan_blocks(&self, start_height: u64) -> anyhow::Result<()> {
     let mut next_block = self.identify_next_block(start_height).await?;
     println!("Starting scan from {:?}", next_block);
 
@@ -77,7 +80,7 @@ impl Scanner {
         height: block.height.into(),
       }, &mut batch);
 
-      self.scan_transaction(&block, &mut batch).await?;
+      self.scan_block(&block, &mut batch).await?;
       
       batch.commit()?;
       println!("Stored block at height {}", block.height);
@@ -92,27 +95,74 @@ impl Scanner {
     }
   }
 
-  pub async fn scan_transaction(&self, block: &bitcoin::Block, batch: &mut store::Batch) -> anyhow::Result<()> {
+  async fn scan_block(&self, block: &bitcoin::Block, batch: &mut store::Batch) -> anyhow::Result<()> {
+    let mut utxo_balance_changes = btree_map::BTreeMap::<String, i128>::new();
+
+    let mut block_txos = btree_map::BTreeMap::<store::txo::TXOID, store::txo::TXO>::new();
+
     for tx in &block.tx {
-      for vout in tx.vout.iter() {
-        let Some(address) = &vout.scriptPubKey.address else {
+      for vin in &tx.vin {
+        let txoid = match vin {
+          bitcoin::TxInput::Coinbase { .. } => continue,
+          bitcoin::TxInput::Normal { txid, vout } => store::txo::TXOID {
+            txid: txid.0.into(),
+            vout: *vout,
+          },
+        };
+
+        let txo = match block_txos.get(&txoid) {
+          Some(txo) => txo.clone(),
+          None => match self.txo_store.get_txo(&txoid)? {
+            Some(txo) => txo,
+            None => anyhow::bail!("TXO not found for input: {:?}", vin),
+          },
+        };
+
+        let Some(address) = &txo.address else {
           continue;
         };
 
-        let utxo = store::utxo::UTXO {
-          id: store::utxo::UTXOID {
+        *utxo_balance_changes.entry(address.clone()).or_default() -= txo.value.satoshis as i128;
+      }
+
+      for vout in tx.vout.iter() {
+        let txo = store::txo::TXO {
+          id: store::txo::TXOID {
             txid: tx.txid.0.into(),
             vout: vout.n,
           },
           value: vout.value.satoshis.into(),
-          address: address.clone(),
+          address: vout.scriptPubKey.address.clone(),
         };
 
-        println!("Inserting UTXO: {:?}", utxo);
+        println!("Inserting TXO: {:?}", txo);
+        self.txo_store.insert_txo(&txo, batch);
+        block_txos.insert(txo.id.clone(), txo);
 
-        self.utxo_store.insert_utxo(&utxo, batch);
+        if let Some(address) = &vout.scriptPubKey.address {
+          *utxo_balance_changes.entry(address.clone()).or_default() += vout.value.satoshis as i128;
+        }
       }
     }
+
+    for (address, balance_change) in utxo_balance_changes {
+      let balance_change: i64 = balance_change.try_into()?;
+
+      if balance_change == 0 {
+        continue;
+      }
+
+      let mut address_state = self.address_store.get_address(&address)?.unwrap_or(AddressState {
+        address: address.clone(),
+        utxo_balance: store::common::Amount { satoshis: 0 },
+      });
+
+      address_state.utxo_balance.satoshis = (i64::try_from(address_state.utxo_balance.satoshis)? + balance_change) as u64;
+
+      self.address_store.insert_address(&address_state, batch);
+      println!("Updated address state: {:?}", address_state);
+    }
+
     Ok(())
   }
 }

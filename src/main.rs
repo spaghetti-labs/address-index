@@ -13,6 +13,9 @@ struct Args {
 
   #[arg(long = "data-dir", env = "DATA_DIR")]
   data_dir: String,
+
+  #[arg(long = "start-height", env = "START_HEIGHT", default_value_t = 0)]
+  start_height: u64,
 }
 
 #[tokio::main]
@@ -30,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
 
   let scanner = scanner::Scanner::open(bitcoin_rpc_client, store)?;
 
-  scanner.scan().await?;
+  scanner.scan(args.start_height).await?;
 
   Ok(())
 }

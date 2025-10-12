@@ -1,13 +1,15 @@
 use std::time::Duration;
 
+use bitcoin_hashes::{Hash160, Sha256};
 use tokio::time::sleep;
 
-use crate::{bitcoin, store};
+use crate::{bitcoin::{self, ScriptPubKey, TxOutput}, store};
 
 pub struct Scanner {
   bitcoin_rpc: bitcoin::BitcoinRpcClient,
   store: store::Store,
-  block_store: store::BlockStore,
+  block_store: store::block::BlockStore,
+  utxo_store: store::utxo::UTXOStore,
 }
 
 #[derive(Debug)]
@@ -22,21 +24,23 @@ impl Scanner {
     store: store::Store,
   ) -> anyhow::Result<Self> {
     let block_store = store.block_store()?;
+    let utxo_store = store.utxo_store()?;
     Ok(Self {
       bitcoin_rpc,
       store,
       block_store,
+      utxo_store,
     })
   }
 
-  async fn identify_next_block(&self) -> anyhow::Result<BlockIdentifier> {
-    let Some(store::Block {
-      height: store::BlockHeight(last_stored_block),
+  async fn identify_next_block(&self, start_height: u64) -> anyhow::Result<BlockIdentifier> {
+    let Some(store::block::Block {
+      height: last_stored_block_height,
       ..
     }) = self.block_store.last_block()? else {
-      return Ok(BlockIdentifier::ByHeight(0));
+      return Ok(BlockIdentifier::ByHeight(start_height));
     };
-    return Ok(BlockIdentifier::ByHeight(last_stored_block + 1));
+    return Ok(BlockIdentifier::ByHeight(last_stored_block_height.height + 1));
   }
 
   async fn get_block(&self, identifier: BlockIdentifier) -> anyhow::Result<bitcoin::Block> {
@@ -57,8 +61,8 @@ impl Scanner {
     Ok(block)
   }
 
-  pub async fn scan(&self) -> anyhow::Result<()> {
-    let mut next_block = self.identify_next_block().await?;
+  pub async fn scan(&self, start_height: u64) -> anyhow::Result<()> {
+    let mut next_block = self.identify_next_block(start_height).await?;
     println!("Starting scan from {:?}", next_block);
 
     loop {
@@ -68,10 +72,13 @@ impl Scanner {
       println!("Fetched block: {:?}", block);
 
       let mut batch = self.store.batch()?;
-      self.block_store.insert_block(store::Block{
-        hash: block.hash.0,
-        height: store::BlockHeight(block.height),
+      self.block_store.insert_block(&store::block::Block{
+        hash: block.hash.0.into(),
+        height: block.height.into(),
       }, &mut batch);
+
+      self.scan_transaction(&block, &mut batch).await?;
+      
       batch.commit()?;
       println!("Stored block at height {}", block.height);
 
@@ -83,5 +90,29 @@ impl Scanner {
         sleep(Duration::from_secs(5)).await;
       }
     }
+  }
+
+  pub async fn scan_transaction(&self, block: &bitcoin::Block, batch: &mut store::Batch) -> anyhow::Result<()> {
+    for tx in &block.tx {
+      for vout in tx.vout.iter() {
+        let Some(address) = &vout.scriptPubKey.address else {
+          continue;
+        };
+
+        let utxo = store::utxo::UTXO {
+          id: store::utxo::UTXOID {
+            txid: tx.txid.0.into(),
+            vout: vout.n,
+          },
+          value: vout.value.satoshis.into(),
+          address: address.clone(),
+        };
+
+        println!("Inserting UTXO: {:?}", utxo);
+
+        self.utxo_store.insert_utxo(&utxo, batch);
+      }
+    }
+    Ok(())
   }
 }

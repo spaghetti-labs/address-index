@@ -16,3 +16,5 @@ reqwest = { version = "0.12.23", features = ["json"] }
 hex = "0.4.3"
 bigdecimal = { version = "0.4.8", features = ["serde", "serde_json"] }
 fjall = { version = "2.11.2", features = ["lz4"] }
+bincode = { version = "2.0.1", features = ["derive"] }
+bitcoin_hashes = "0.16.0"

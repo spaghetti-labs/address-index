@@ -1,5 +1,3 @@
-use core::fmt;
-
 use bigdecimal::num_bigint;
 
 use crate::jsonrpc1::RpcClient;
@@ -71,8 +69,6 @@ pub struct TxOutput {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct ScriptPubKey {
-  #[serde(rename = "type")]
-  pub script_type: String,
   pub address: Option<String>,
 }
 

@@ -50,13 +50,13 @@ macro_rules! impl_hex_debug {
   ($type:ty, $field_name:ident) => {
     impl std::fmt::Debug for $type {
       fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.$field_name))
+        write!(f, "{}", hex::encode(&self.$field_name))
       }
     }
   };
 }
 
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(Debug, bincode::Encode, bincode::Decode, Clone, Copy)]
 pub struct BlockHeight {
   pub height: u64,
 }
@@ -70,7 +70,7 @@ pub struct Amount {
 impl_bincode_conversion!(Amount);
 impl_primitive_conversion!(Amount, u64, satoshis);
 
-#[derive(bincode::Encode, bincode::Decode)]
+#[derive(bincode::Encode, bincode::Decode, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BlockHash {
   pub bytes: [u8; 32],
 }
@@ -78,22 +78,37 @@ impl_bincode_conversion!(BlockHash);
 impl_primitive_conversion!(BlockHash, [u8; 32], bytes);
 impl_hex_debug!(BlockHash, bytes);
 
-#[derive(bincode::Encode, bincode::Decode)]
-pub struct ScriptPubKey {
-  pub bytes: [u8; 67],
+#[derive(bincode::Encode, bincode::Decode, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Script {
+  pub bytes: Vec<u8>,
 }
-impl_bincode_conversion!(ScriptPubKey);
-impl_primitive_conversion!(ScriptPubKey, [u8; 67], bytes);
-impl_hex_debug!(ScriptPubKey, bytes);
+impl_bincode_conversion!(Script);
+impl_primitive_conversion!(Script, Vec<u8>, bytes);
+impl_hex_debug!(Script, bytes);
 
-#[derive(bincode::Encode, bincode::Decode)]
-pub struct ScriptPubKeyHash {
+#[derive(bincode::Encode, bincode::Decode, Clone, Copy)]
+pub struct CompressedPubKey {
+  pub bytes: [u8; 33],
+}
+impl_bincode_conversion!(CompressedPubKey);
+impl_primitive_conversion!(CompressedPubKey, [u8; 33], bytes);
+impl_hex_debug!(CompressedPubKey, bytes);
+
+#[derive(bincode::Encode, bincode::Decode, Clone, Copy)]
+pub struct UncompressedPubKey {
+  pub bytes: [u8; 65],
+}
+impl_bincode_conversion!(UncompressedPubKey);
+impl_primitive_conversion!(UncompressedPubKey, [u8; 65], bytes);
+impl_hex_debug!(UncompressedPubKey, bytes);
+
+#[derive(bincode::Encode, bincode::Decode, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PubKeyHash {
   pub bytes: [u8; 20],
 }
-impl_bincode_conversion!(ScriptPubKeyHash);
-impl_primitive_conversion!(ScriptPubKeyHash, [u8; 20], bytes);
-impl_hex_debug!(ScriptPubKeyHash, bytes);
-
+impl_bincode_conversion!(PubKeyHash);
+impl_primitive_conversion!(PubKeyHash, [u8; 20], bytes);
+impl_hex_debug!(PubKeyHash, bytes);
 
 #[derive(bincode::Encode, bincode::Decode, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct TransactionID {

@@ -68,7 +68,7 @@ pub struct TxOutput {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct ScriptPubKey {
-  pub address: Option<String>,
+  pub hex: Hex<Vec<u8>>,
 }
 
 #[derive(Clone)]

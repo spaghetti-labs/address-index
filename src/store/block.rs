@@ -1,27 +1,26 @@
-use crate::impl_bincode_conversion;
-use super::Batch;
+use crate::store::{TxRead, WriteTx};
 
-#[derive(Debug, bincode::Encode, bincode::Decode)]
-pub struct Block {
-  pub hash: super::common::BlockHash,
-  pub height: super::common::BlockHeight,
-}
-impl_bincode_conversion!(Block);
+use super::{common::{BlockHash, BlockHeight}};
 
-pub struct BlockStore {
-  pub(super) partition: fjall::Partition,
+pub trait BlockStoreRead {
+  fn get_tip_block(&self) -> anyhow::Result<Option<(BlockHeight, BlockHash)>>;
 }
 
-impl BlockStore {
-  pub fn last_block(&self) -> anyhow::Result<Option<Block>> {
-    Ok(
-      self.partition.last_key_value()?
-        .map(|(_, value)| value)
-        .map(Block::from)
-    )
+pub trait BlockStoreWrite {
+  fn insert_block(&mut self, hash: &BlockHash, height: &BlockHeight);
+}
+
+impl<T: TxRead> BlockStoreRead for T {
+  fn get_tip_block(&self) -> anyhow::Result<Option<(BlockHeight, BlockHash)>> {
+    Ok(self.last_key_value(&self.store().height_to_block_hash)?.and_then(
+      |(key, value)| Some((BlockHeight::from(key), BlockHash::from(value)))
+    ))
   }
+}
 
-  pub fn insert_block(&self, block: &Block, batch: &mut Batch) {
-    batch.batch.insert(&self.partition, &block.height, block);
+impl BlockStoreWrite for WriteTx<'_> {
+  fn insert_block(&mut self, hash: &BlockHash, height: &BlockHeight) {
+    self.tx.insert(&self.store.block_hash_to_height, hash, height);
+    self.tx.insert(&self.store.height_to_block_hash, height, hash);
   }
 }

@@ -1,16 +1,9 @@
-use std::{collections::btree_map, time::Duration};
+use crate::{bitcoin, store::{self, account::{AccountStoreRead as _, AccountStoreWrite as _}, block::{BlockStoreRead as _, BlockStoreWrite}, common::{Amount, BlockHash, Script}, txo::{self, TXOStoreRead as _, TXOStoreWrite, TXO, TXOID}, Store, WriteTx}};
 
-use bitcoin_hashes::{Hash160, Sha256};
-use tokio::time::sleep;
 
-use crate::{bitcoin::{self, ScriptPubKey, TxOutput}, store::{self, address::AddressState, txo}};
-
-pub struct Scanner {
+pub struct Scanner<'a> {
   bitcoin_rpc: bitcoin::BitcoinRpcClient,
-  store: store::Store,
-  block_store: store::block::BlockStore,
-  txo_store: store::txo::TXOStore,
-  address_store: store::address::AddressStore,
+  store: &'a Store,
 }
 
 #[derive(Debug)]
@@ -19,148 +12,133 @@ enum BlockIdentifier {
   ByHash(bitcoin::BlockHash),
 }
 
-impl Scanner {
+pub struct ScanNextBlockHint {
+  next_block_hash: Option<bitcoin::BlockHash>,
+}
+
+impl Default for ScanNextBlockHint {
+  fn default() -> Self {
+    Self { next_block_hash: None }
+  }
+}
+
+pub enum ScanResult {
+  ProcessedBlock {
+    scan_next_block_hint: ScanNextBlockHint,
+  },
+  NoNewBlock,
+}
+
+impl<'a> Scanner<'a> {
   pub fn open(
     bitcoin_rpc: bitcoin::BitcoinRpcClient,
-    store: store::Store,
+    store: &'a Store,
   ) -> anyhow::Result<Self> {
-    let block_store = store.block_store()?;
-    let txo_store = store.txo_store()?;
-    let address_store = store.address_store()?;
     Ok(Self {
       bitcoin_rpc,
       store,
-      block_store,
-      txo_store,
-      address_store,
     })
   }
 
-  async fn identify_next_block(&self, start_height: u64) -> anyhow::Result<BlockIdentifier> {
-    let Some(store::block::Block {
-      height: last_stored_block_height,
-      ..
-    }) = self.block_store.last_block()? else {
-      return Ok(BlockIdentifier::ByHeight(start_height));
-    };
-    return Ok(BlockIdentifier::ByHeight(last_stored_block_height.height + 1));
-  }
+  pub async fn scan_next_block(&self, hint: &ScanNextBlockHint) -> anyhow::Result<ScanResult> {
+    let mut tx = self.store.write_tx();
 
-  async fn get_block(&self, identifier: BlockIdentifier) -> anyhow::Result<bitcoin::Block> {
-    let hash = match &identifier {
-      BlockIdentifier::ByHeight(height) => self.bitcoin_rpc.getblockhash(*height).await?,
-      BlockIdentifier::ByHash(hash) => hash.clone(),
+    let (prev_block_hash, next_block_height) = match tx.get_tip_block()? {
+      Some((height, hash)) => (Some(hash), height.height + 1),
+      None => (None, 0),
     };
-    let block = self.bitcoin_rpc.getblock(hash).await?;
-    match &identifier {
-      BlockIdentifier::ByHeight(height) if block.height != *height => {
-        anyhow::bail!("Expected block at height {}, but got block at height {}", height, block.height);
+
+    let next_block_hash = match &hint.next_block_hash {
+      Some(hash) => hash.clone(),
+      None => {
+        let blockchain_info = self.bitcoin_rpc.getblockchaininfo().await?;
+        if next_block_height > blockchain_info.blocks {
+          return Ok(ScanResult::NoNewBlock);
+        }
+
+        self.bitcoin_rpc.getblockhash(next_block_height).await?
       }
-      BlockIdentifier::ByHash(hash) if block.hash.0 != hash.0 => {
-        anyhow::bail!("Expected block with hash {:?}, but got block with hash {:?}", hash, block.hash);
-      }
-      _ => {}
+    };
+
+    println!("Fetching block: {:?} @ {:?}", next_block_hash, next_block_height);
+    let next_block = self.bitcoin_rpc.getblock(next_block_hash).await?;
+
+    if next_block.height != next_block_height {
+      anyhow::bail!(
+        "Unexpected block height: expected {}, got {}",
+        next_block_height,
+        next_block.height
+      );
     }
-    Ok(block)
-  }
 
-  pub async fn scan_blocks(&self, start_height: u64) -> anyhow::Result<()> {
-    let mut next_block = self.identify_next_block(start_height).await?;
-    println!("Starting scan from {:?}", next_block);
-
-    loop {
-      println!("Fetching block: {:?}", next_block);
-
-      let block = self.get_block(next_block).await?;
-      println!("Fetched block: {:?}", block);
-
-      let mut batch = self.store.batch()?;
-      self.block_store.insert_block(&store::block::Block{
-        hash: block.hash.0.into(),
-        height: block.height.into(),
-      }, &mut batch);
-
-      self.scan_block(&block, &mut batch).await?;
-      
-      batch.commit()?;
-      println!("Stored block at height {}", block.height);
-
-      if let Some(next_hash) = block.nextblockhash {
-        next_block = BlockIdentifier::ByHash(next_hash);
-      } else {
-        next_block = BlockIdentifier::ByHeight(block.height + 1);
-        println!("Reached the tip of the blockchain at block height {}", block.height);
-        sleep(Duration::from_secs(5)).await;
+    if let Some(prev_block_hash) = prev_block_hash {
+      let Some(received_previousblockhash) = &next_block.previousblockhash else {
+        anyhow::bail!("Block at height {} has no `previousblockhash`", next_block.height);
+      };
+      if prev_block_hash.bytes != received_previousblockhash.0 {
+        anyhow::bail!(
+          "Reorg detected at height {}: expected previous block hash {:?}, got {:?}",
+          next_block.height,
+          prev_block_hash,
+          received_previousblockhash.0
+        );
       }
     }
+
+    self.scan_block_transactions(&next_block, &mut tx).await?;
+
+    tx.insert_block(&next_block.hash.0.into(), &next_block.height.into());
+
+    tx.commit()?;
+
+    Ok(ScanResult::ProcessedBlock {
+      scan_next_block_hint: ScanNextBlockHint {
+        next_block_hash: next_block.nextblockhash,
+      }
+    })
   }
 
-  async fn scan_block(&self, block: &bitcoin::Block, batch: &mut store::Batch) -> anyhow::Result<()> {
-    let mut utxo_balance_changes = btree_map::BTreeMap::<String, i128>::new();
-
-    let mut block_txos = btree_map::BTreeMap::<store::txo::TXOID, store::txo::TXO>::new();
-
-    for tx in &block.tx {
-      for vin in &tx.vin {
+  async fn scan_block_transactions(&self, block: &bitcoin::Block, tx: &mut WriteTx<'_>) -> anyhow::Result<()> {
+    for transaction in &block.tx {
+      for vin in &transaction.vin {
         let txoid = match vin {
           bitcoin::TxInput::Coinbase { .. } => continue,
-          bitcoin::TxInput::Normal { txid, vout } => store::txo::TXOID {
+          bitcoin::TxInput::Normal { txid, vout } => TXOID {
             txid: txid.0.into(),
             vout: *vout,
           },
         };
 
-        let txo = match block_txos.get(&txoid) {
-          Some(txo) => txo.clone(),
-          None => match self.txo_store.get_txo(&txoid)? {
-            Some(txo) => txo,
-            None => anyhow::bail!("TXO not found for input: {:?}", vin),
-          },
+        let Some(txo) = tx.get_txo(&txoid)? else {
+          anyhow::bail!("TXO not found for input: {:?}, {:?}", vin, txoid);
         };
 
-        let Some(address) = &txo.address else {
-          continue;
-        };
-
-        *utxo_balance_changes.entry(address.clone()).or_default() -= txo.value.satoshis as i128;
+        let prev_balance = tx.get_recent_balance(&txo.locker_script)?;
+        let new_balance = prev_balance.satoshis.checked_sub(txo.value.into()).ok_or_else(|| anyhow::anyhow!(
+          "Negative balance for script {:?}: {:?} - {:?} @ {:?}#{:?}",
+          txo.locker_script, prev_balance, txo.value, block.height, transaction.txid,
+        ))?.into();
+        tx.insert_balance(&txo.locker_script, &block.height.into(), &new_balance);
       }
 
-      for vout in tx.vout.iter() {
-        let txo = store::txo::TXO {
-          id: store::txo::TXOID {
-            txid: tx.txid.0.into(),
-            vout: vout.n,
-          },
+      for vout in transaction.vout.iter() {
+        let txoid = TXOID {
+          txid: transaction.txid.0.into(),
+          vout: vout.n,
+        };
+
+        tx.insert_txo(&block.height.into(), &txoid, &TXO {
+          locker_script: vout.scriptPubKey.hex.0.clone().into(),
           value: vout.value.satoshis.into(),
-          address: vout.scriptPubKey.address.clone(),
-        };
+        });
 
-        println!("Inserting TXO: {:?}", txo);
-        self.txo_store.insert_txo(&txo, batch);
-        block_txos.insert(txo.id.clone(), txo);
-
-        if let Some(address) = &vout.scriptPubKey.address {
-          *utxo_balance_changes.entry(address.clone()).or_default() += vout.value.satoshis as i128;
-        }
+        let prev_balance = tx.get_recent_balance(&vout.scriptPubKey.hex.0.clone().into())?;
+        let new_balance = prev_balance.satoshis.checked_add(vout.value.satoshis).ok_or_else(|| anyhow::anyhow!(
+          "Overflow balance for script {:?}: {:?} + {:?} @ {:?}#{:?}",
+          vout.scriptPubKey.hex, prev_balance, vout.value, block.height, transaction.txid,
+        ))?.into();
+        tx.insert_balance(&vout.scriptPubKey.hex.0.clone().into(), &block.height.into(), &new_balance);
       }
-    }
-
-    for (address, balance_change) in utxo_balance_changes {
-      let balance_change: i64 = balance_change.try_into()?;
-
-      if balance_change == 0 {
-        continue;
-      }
-
-      let mut address_state = self.address_store.get_address(&address)?.unwrap_or(AddressState {
-        address: address.clone(),
-        utxo_balance: store::common::Amount { satoshis: 0 },
-      });
-
-      address_state.utxo_balance.satoshis = (i64::try_from(address_state.utxo_balance.satoshis)? + balance_change) as u64;
-
-      self.address_store.insert_address(&address_state, batch);
-      println!("Updated address state: {:?}", address_state);
     }
 
     Ok(())

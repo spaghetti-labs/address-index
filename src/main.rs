@@ -2,6 +2,7 @@ mod bitcoin;
 mod jsonrpc1;
 mod store;
 mod scanner;
+mod script;
 
 use std::time::Duration;
 

@@ -9,7 +9,7 @@ use std::time::Duration;
 use clap::Parser;
 use tokio::time::sleep;
 
-use crate::{bitcoin_rpc::BitcoinRpcClient, scanner::ScanResult};
+use crate::{bitcoin_rpc::BitcoinRpcClient};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -36,13 +36,7 @@ async fn main() -> anyhow::Result<()> {
 
   let scanner = scanner::Scanner::open(bitcoin_rpc_client, &store)?;
 
-  loop {
-    if let ScanResult::ProcessedBlock { block_hash } = scanner.scan_next_block().await? {
-      println!("Processed block: {:?}", block_hash);
-      continue;
-    }
+  scanner.scan_blocks().await?;
 
-    println!("No new block found...");
-    sleep(Duration::from_secs(5)).await;
-  }
+  Ok(())
 }

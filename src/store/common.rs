@@ -1,4 +1,5 @@
 use bincode::config::{standard, BigEndian, Configuration, Fixint, NoLimit};
+use bitcoin::hashes::Hash;
 
 pub const BINCODE_CONFIG: Configuration<BigEndian, Fixint, NoLimit> = standard()
   .with_big_endian()
@@ -117,3 +118,9 @@ pub struct TransactionID {
 impl_bincode_conversion!(TransactionID);
 impl_primitive_conversion!(TransactionID, [u8; 32], bytes);
 impl_hex_debug!(TransactionID, bytes);
+
+impl From<bitcoin::Txid> for TransactionID {
+  fn from(txid: bitcoin::Txid) -> Self {
+    Self { bytes: txid.as_raw_hash().to_byte_array() }
+  }
+}

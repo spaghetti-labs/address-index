@@ -96,6 +96,7 @@ impl<'a> TryFrom<&Assembly<'a>> for StandardScript<'a> {
   }
 }
 
+#[derive(Clone, Copy)]
 pub enum Operator<'a> {
   DUP,
   HASH160,
@@ -107,14 +108,14 @@ pub enum Operator<'a> {
 }
 
 impl Operator<'_> {
-  pub fn size(&self) -> usize {
-    match *self {
+  pub fn size(self) -> usize {
+    match self {
       Operator::PUSHBYTES { bytes } => 1 + bytes.len(),
       _ => 1,
     }
   }
 
-  pub fn write_to(&self, buf: &mut Vec<u8>) {
+  pub fn write_to(self, buf: &mut Vec<u8>) {
     match self {
       Operator::DUP => buf.push(0x76),
       Operator::HASH160 => buf.push(0xa9),
@@ -164,7 +165,7 @@ pub struct Assembly<'a> {
 
 impl<'a> Assembly<'a> {
   pub fn size(&self) -> usize {
-    self.operators.iter().map(Operator::size).sum()
+    self.operators.iter().copied().map(Operator::size).sum()
   }
 }
 

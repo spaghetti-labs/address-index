@@ -1,37 +1,23 @@
-use crate::{bitcoin, store::{self, account::{AccountStoreRead as _, AccountStoreWrite as _}, block::{BlockStoreRead as _, BlockStoreWrite}, common::{Amount, BlockHash, Script}, txo::{self, TXOStoreRead as _, TXOStoreWrite, TXO, TXOID}, Store, WriteTx}};
+use bitcoin::hashes::Hash;
+
+use crate::{bitcoin_rpc::BitcoinRpcClient, store::{self, account::{AccountStoreRead as _, AccountStoreWrite as _}, block::{BlockStoreRead as _, BlockStoreWrite}, common::{Amount, BlockHash, BlockHeight, Script}, txo::{self, TXOStoreRead as _, TXOStoreWrite, TXO, TXOID}, Store, WriteTx}};
 
 
 pub struct Scanner<'a> {
-  bitcoin_rpc: bitcoin::BitcoinRpcClient,
+  bitcoin_rpc: BitcoinRpcClient,
   store: &'a Store,
-}
-
-#[derive(Debug)]
-enum BlockIdentifier {
-  ByHeight(u64),
-  ByHash(bitcoin::BlockHash),
-}
-
-pub struct ScanNextBlockHint {
-  next_block_hash: Option<bitcoin::BlockHash>,
-}
-
-impl Default for ScanNextBlockHint {
-  fn default() -> Self {
-    Self { next_block_hash: None }
-  }
 }
 
 pub enum ScanResult {
   ProcessedBlock {
-    scan_next_block_hint: ScanNextBlockHint,
+    block_hash: bitcoin::BlockHash,
   },
   NoNewBlock,
 }
 
 impl<'a> Scanner<'a> {
   pub fn open(
-    bitcoin_rpc: bitcoin::BitcoinRpcClient,
+    bitcoin_rpc: BitcoinRpcClient,
     store: &'a Store,
   ) -> anyhow::Result<Self> {
     Ok(Self {
@@ -40,7 +26,7 @@ impl<'a> Scanner<'a> {
     })
   }
 
-  pub async fn scan_next_block(&self, hint: &ScanNextBlockHint) -> anyhow::Result<ScanResult> {
+  pub async fn scan_next_block(&self) -> anyhow::Result<ScanResult> {
     let mut tx = self.store.write_tx();
 
     let (prev_block_hash, next_block_height) = match tx.get_tip_block()? {
@@ -48,65 +34,47 @@ impl<'a> Scanner<'a> {
       None => (None, 0),
     };
 
-    let next_block_hash = match &hint.next_block_hash {
-      Some(hash) => hash.clone(),
-      None => {
-        let blockchain_info = self.bitcoin_rpc.getblockchaininfo().await?;
-        if next_block_height > blockchain_info.blocks {
-          return Ok(ScanResult::NoNewBlock);
-        }
+    let blockchain_info = self.bitcoin_rpc.getblockchaininfo().await?;
+    if next_block_height > blockchain_info.blocks {
+      return Ok(ScanResult::NoNewBlock);
+    }
 
-        self.bitcoin_rpc.getblockhash(next_block_height).await?
-      }
-    };
+    let next_block_hash = self.bitcoin_rpc.getblockhash(next_block_height).await?;
 
     println!("Fetching block: {:?} @ {:?}", next_block_hash, next_block_height);
     let next_block = self.bitcoin_rpc.getblock(next_block_hash).await?;
 
-    if next_block.height != next_block_height {
-      anyhow::bail!(
-        "Unexpected block height: expected {}, got {}",
-        next_block_height,
-        next_block.height
-      );
-    }
-
     if let Some(prev_block_hash) = prev_block_hash {
-      let Some(received_previousblockhash) = &next_block.previousblockhash else {
-        anyhow::bail!("Block at height {} has no `previousblockhash`", next_block.height);
-      };
-      if prev_block_hash.bytes != received_previousblockhash.0 {
+      if prev_block_hash.bytes != next_block.header.prev_blockhash.to_byte_array() {
         anyhow::bail!(
           "Reorg detected at height {}: expected previous block hash {:?}, got {:?}",
-          next_block.height,
+          next_block_height,
           prev_block_hash,
-          received_previousblockhash.0
+          next_block.header.prev_blockhash
         );
       }
     }
 
-    self.scan_block_transactions(&next_block, &mut tx).await?;
+    self.scan_block_transactions(&next_block, next_block_height.into(), &mut tx).await?;
 
-    tx.insert_block(&next_block.hash.0.into(), &next_block.height.into());
+    tx.insert_block(&next_block.block_hash().to_raw_hash().to_byte_array().into(), &next_block_height.into());
 
     tx.commit()?;
 
     Ok(ScanResult::ProcessedBlock {
-      scan_next_block_hint: ScanNextBlockHint {
-        next_block_hash: next_block.nextblockhash,
-      }
+      block_hash: next_block.block_hash(),
     })
   }
 
-  async fn scan_block_transactions(&self, block: &bitcoin::Block, tx: &mut WriteTx<'_>) -> anyhow::Result<()> {
-    for transaction in &block.tx {
-      for vin in &transaction.vin {
-        let txoid = match vin {
-          bitcoin::TxInput::Coinbase { .. } => continue,
-          bitcoin::TxInput::Normal { txid, vout } => TXOID {
-            txid: txid.0.into(),
-            vout: *vout,
-          },
+  async fn scan_block_transactions(&self, block: &bitcoin::Block, height: BlockHeight, tx: &mut WriteTx<'_>) -> anyhow::Result<()> {
+    for transaction in &block.txdata {
+      for vin in &transaction.input {
+        if vin.previous_output.is_null() {
+          continue;
+        }
+        let txoid = TXOID {
+          txid: vin.previous_output.txid.into(),
+          vout: vin.previous_output.vout,
         };
 
         let Some(txo) = tx.get_txo(&txoid)? else {
@@ -115,29 +83,29 @@ impl<'a> Scanner<'a> {
 
         let prev_balance = tx.get_recent_balance(&txo.locker_script)?;
         let new_balance = prev_balance.satoshis.checked_sub(txo.value.into()).ok_or_else(|| anyhow::anyhow!(
-          "Negative balance for script {:?}: {:?} - {:?} @ {:?}#{:?}",
-          txo.locker_script, prev_balance, txo.value, block.height, transaction.txid,
+          "Negative balance for script {:?}: {:?} - {:?} @ {:?}",
+          txo.locker_script, prev_balance, txo.value, transaction.compute_txid(),
         ))?.into();
-        tx.insert_balance(&txo.locker_script, &block.height.into(), &new_balance);
+        tx.insert_balance(&txo.locker_script, &height, &new_balance);
       }
 
-      for vout in transaction.vout.iter() {
+      for (vout_index, vout) in transaction.output.iter().enumerate() {
         let txoid = TXOID {
-          txid: transaction.txid.0.into(),
-          vout: vout.n,
+          txid: transaction.compute_txid().into(),
+          vout: vout_index as u32,
         };
 
-        tx.insert_txo(&block.height.into(), &txoid, &TXO {
-          locker_script: vout.scriptPubKey.hex.0.clone().into(),
-          value: vout.value.satoshis.into(),
+        tx.insert_txo(&height, &txoid, &TXO {
+          locker_script: vout.script_pubkey.to_bytes().into(),
+          value: vout.value.to_sat().into(),
         });
 
-        let prev_balance = tx.get_recent_balance(&vout.scriptPubKey.hex.0.clone().into())?;
-        let new_balance = prev_balance.satoshis.checked_add(vout.value.satoshis).ok_or_else(|| anyhow::anyhow!(
+        let prev_balance = tx.get_recent_balance(&vout.script_pubkey.to_bytes().into())?;
+        let new_balance = prev_balance.satoshis.checked_add(vout.value.to_sat()).ok_or_else(|| anyhow::anyhow!(
           "Overflow balance for script {:?}: {:?} + {:?} @ {:?}#{:?}",
-          vout.scriptPubKey.hex, prev_balance, vout.value, block.height, transaction.txid,
+          vout.script_pubkey, prev_balance, vout.value, height, transaction.compute_txid(),
         ))?.into();
-        tx.insert_balance(&vout.scriptPubKey.hex.0.clone().into(), &block.height.into(), &new_balance);
+        tx.insert_balance(&vout.script_pubkey.to_bytes().into(), &height, &new_balance);
       }
     }
 

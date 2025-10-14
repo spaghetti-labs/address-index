@@ -1,5 +1,5 @@
-mod bitcoin;
-mod jsonrpc1;
+mod bitcoin_rpc;
+mod json_rpc_v1;
 mod store;
 mod scanner;
 mod script;
@@ -9,7 +9,7 @@ use std::time::Duration;
 use clap::Parser;
 use tokio::time::sleep;
 
-use crate::scanner::ScanResult;
+use crate::{bitcoin_rpc::BitcoinRpcClient, scanner::ScanResult};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -26,8 +26,8 @@ async fn main() -> anyhow::Result<()> {
   let args = Args::try_parse()?;
 
   // Configure the client to be more lenient with JSON-RPC version validation
-  let jsonrpc1_client = jsonrpc1::RpcClient::new(args.rpc_url);
-  let bitcoin_rpc_client = bitcoin::BitcoinRpcClient::new(jsonrpc1_client);
+  let json_rpc_v1_client = json_rpc_v1::RpcClient::new(args.rpc_url);
+  let bitcoin_rpc_client = BitcoinRpcClient::new(json_rpc_v1_client);
 
   let blockchain_info = bitcoin_rpc_client.getblockchaininfo().await?;
   println!("Blockchain info: {:?}", blockchain_info);
@@ -36,11 +36,9 @@ async fn main() -> anyhow::Result<()> {
 
   let scanner = scanner::Scanner::open(bitcoin_rpc_client, &store)?;
 
-  let mut hint = scanner::ScanNextBlockHint::default();
-
   loop {
-    if let ScanResult::ProcessedBlock { scan_next_block_hint } = scanner.scan_next_block(&hint).await? {
-      hint = scan_next_block_hint;
+    if let ScanResult::ProcessedBlock { block_hash } = scanner.scan_next_block().await? {
+      println!("Processed block: {:?}", block_hash);
       continue;
     }
 

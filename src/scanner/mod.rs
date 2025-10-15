@@ -1,3 +1,5 @@
+use std::convert::Infallible;
+
 use bitcoin::{hashes::Hash, BlockHash};
 use futures::{stream, StreamExt};
 use tokio::task::block_in_place;
@@ -21,7 +23,7 @@ impl<'a> Scanner<'a> {
     })
   }
 
-  pub async fn scan_blocks(&self) -> anyhow::Result<()> {
+  pub async fn scan_blocks(&self) -> anyhow::Result<Infallible> {
     let start_height = block_in_place(||{
       let tx = self.store.read_tx();
       tx.get_tip_block()
@@ -47,7 +49,7 @@ impl<'a> Scanner<'a> {
       println!("Processed block: {:?}", block.block_hash());
     }
 
-    Ok(())
+    unreachable!();
   }
 
   async fn scan_block(&self, next_block: &bitcoin::Block) -> anyhow::Result<()> {

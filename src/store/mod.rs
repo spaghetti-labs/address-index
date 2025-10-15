@@ -1,3 +1,5 @@
+use std::ops::RangeBounds;
+
 use fjall::{KvPair, PartitionCreateOptions, TxPartitionHandle, UserValue};
 
 pub mod common;
@@ -80,6 +82,11 @@ pub(self) trait TxRead {
     partition: &'b TxPartitionHandle,
     prefix: K,
   ) -> impl DoubleEndedIterator<Item = fjall::Result<KvPair>> + 'b;
+  fn range<'b, K: AsRef<[u8]> + 'b, R: RangeBounds<K> + 'b>(
+    &'b self,
+    partition: &'b TxPartitionHandle,
+    range: R,
+  ) -> impl DoubleEndedIterator<Item = fjall::Result<KvPair>> + 'b;
 }
 
 macro_rules! impl_tx_read {
@@ -103,6 +110,14 @@ macro_rules! impl_tx_read {
         prefix: K,
       ) -> impl DoubleEndedIterator<Item = fjall::Result<KvPair>> + 'b {
         self.$tx_field.prefix(partition, prefix)
+      }
+
+      fn range<'b, K: AsRef<[u8]> + 'b, R: RangeBounds<K> + 'b>(
+        &'b self,
+        partition: &'b TxPartitionHandle,
+        range: R,
+      ) -> impl DoubleEndedIterator<Item = fjall::Result<KvPair>> + 'b {
+        self.$tx_field.range(partition, range)
       }
     }
   };

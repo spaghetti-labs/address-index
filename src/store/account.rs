@@ -5,6 +5,7 @@ use super::{common::{Amount, CompressedPubKey, PubKeyHash, Script, TransactionID
 
 pub trait AccountStoreRead {
   fn get_recent_balance(&self, script: &Script) -> anyhow::Result<Amount>;
+  fn get_historical_balance(&self, script: &Script, height: &BlockHeight) -> anyhow::Result<Amount>;
 }
 
 pub trait AccountStoreWrite {
@@ -17,6 +18,21 @@ impl<T: TxRead> AccountStoreRead for T {
       return Ok(0.into());
     };
     return Ok(last.into());
+  }
+
+  fn get_historical_balance(&self, script: &Script, height: &BlockHeight) -> anyhow::Result<Amount> {
+    let Some((_, balance)) = self.range(
+      &self.store().locker_script_and_height_to_balance,
+      Slice::from(&LockerScriptAndHeight { locker_script: script.clone(), height: BlockHeight { height: 0 } })
+        ..=
+        Slice::from(&LockerScriptAndHeight { locker_script: script.clone(), height: *height }),
+    )
+      .rev()
+      .next()
+      .transpose()? else {
+        return Ok(0.into());
+      };
+    Ok(balance.into())
   }
 }
 

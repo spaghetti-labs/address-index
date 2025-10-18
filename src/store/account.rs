@@ -6,6 +6,7 @@ use super::{common::{Amount, CompressedPubKey, PubKeyHash, Script, TransactionID
 pub trait AccountStoreRead {
   fn get_recent_balance(&self, locker_script_id: ScriptID) -> anyhow::Result<Amount>;
   fn get_historical_balance(&self, locker_script_id: ScriptID, height: BlockHeight) -> anyhow::Result<Amount>;
+  fn get_balance_history(&self, locker_script_id: ScriptID) -> anyhow::Result<Vec<(BlockHeight, Amount)>>;
 }
 
 pub trait AccountStoreWrite {
@@ -33,6 +34,19 @@ impl<T: TxRead> AccountStoreRead for T {
         return Ok(0.into());
       };
     Ok(balance.into())
+  }
+
+  fn get_balance_history(&self, locker_script_id: ScriptID) -> anyhow::Result<Vec<(BlockHeight, Amount)>> {
+    let mut historical_balances = Vec::new();
+    for entry in self.prefix(
+      &self.store().locker_script_id_and_height_to_balance, 
+      Slice::from(locker_script_id),
+    ) {
+      let (key, balance) = entry?;
+      let LockerScriptIDAndHeight { height, .. } = key.into();
+      historical_balances.push((height, balance.into()));
+    }
+    Ok(historical_balances)
   }
 }
 

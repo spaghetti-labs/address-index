@@ -6,6 +6,7 @@ pub mod common;
 pub mod block;
 pub mod txo;
 pub mod account;
+pub mod script;
 
 pub struct Store {
   keyspace: fjall::TxKeyspace,
@@ -16,8 +17,11 @@ pub struct Store {
   pub(self) txoid_to_txo: fjall::TxPartition,
   pub(self) height_and_txoid: fjall::TxPartition,
 
-  pub(self) locker_script_and_height_to_balance: fjall::TxPartition,
-  pub(self) height_and_locker_script: fjall::TxPartition,
+  pub(self) locker_script_id_and_height_to_balance: fjall::TxPartition,
+  pub(self) height_and_locker_script_id: fjall::TxPartition,
+
+  pub(self) script_to_script_id: fjall::TxPartition,
+  pub(self) script_id_to_script: fjall::TxPartition,
 }
 
 impl Store {
@@ -31,8 +35,11 @@ impl Store {
       txoid_to_txo: keyspace.open_partition("txoid_to_txo", PartitionCreateOptions::default())?,
       height_and_txoid: keyspace.open_partition("height_and_txoid", PartitionCreateOptions::default())?,
 
-      locker_script_and_height_to_balance: keyspace.open_partition("locker_script_and_height_to_balance", PartitionCreateOptions::default())?,
-      height_and_locker_script: keyspace.open_partition("height_and_locker_script", PartitionCreateOptions::default())?,
+      locker_script_id_and_height_to_balance: keyspace.open_partition("locker_script_id_and_height_to_balance", PartitionCreateOptions::default())?,
+      height_and_locker_script_id: keyspace.open_partition("height_and_locker_script_id", PartitionCreateOptions::default())?,
+
+      script_to_script_id: keyspace.open_partition("script_to_script_id", PartitionCreateOptions::default())?,
+      script_id_to_script: keyspace.open_partition("script_id_to_script", PartitionCreateOptions::default())?,
 
       keyspace,
     })

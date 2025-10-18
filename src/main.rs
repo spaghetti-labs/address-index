@@ -11,7 +11,7 @@ use juniper::{graphql_object, EmptyMutation, EmptySubscription, RootNode};
 use rocket::{response::content::RawHtml, routes, State};
 use tokio::{select, task::block_in_place, time::sleep};
 
-use crate::{bitcoin_rpc::BitcoinRpcClient, store::{account::AccountStoreRead, block::BlockStoreRead, Store}};
+use crate::{bitcoin_rpc::BitcoinRpcClient, store::{account::AccountStoreRead, block::BlockStoreRead, script::TXOStoreRead, Store}};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -30,9 +30,6 @@ async fn main() -> anyhow::Result<Infallible> {
   // Configure the client to be more lenient with JSON-RPC version validation
   let json_rpc_v1_client = json_rpc_v1::RpcClient::new(args.rpc_url);
   let bitcoin_rpc_client = BitcoinRpcClient::new(json_rpc_v1_client);
-
-  let blockchain_info = bitcoin_rpc_client.getblockchaininfo().await?;
-  println!("Blockchain info: {:?}", blockchain_info);
 
   let store = Arc::new(Store::open(&args.data_dir)?);
 
@@ -116,14 +113,17 @@ impl Query {
     let tx = self.store.read_tx();
     let script_bytes = hex::decode(script)?;
     let script = store::common::Script::from(script_bytes);
+    let Some(script_id) = block_in_place(||tx.get_script_id(&script))? else {
+      return Ok("0".to_string());
+    };
     let balance = match height {
       Some(height) => {
         let height: u64 = height.parse()?;
         let block_height = store::common::BlockHeight { height };
-        block_in_place(||tx.get_historical_balance(&script, &block_height))?
+        block_in_place(||tx.get_historical_balance(script_id, block_height))?
       }
       None => {
-        block_in_place(||tx.get_recent_balance(&script))?
+        block_in_place(||tx.get_recent_balance(script_id))?
       }
     };
     Ok(balance.satoshis.to_string())

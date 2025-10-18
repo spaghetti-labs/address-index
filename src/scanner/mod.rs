@@ -4,7 +4,7 @@ use bitcoin::{hashes::Hash, BlockHash};
 use futures::{stream, StreamExt};
 use tokio::task::block_in_place;
 
-use crate::{bitcoin_rpc::BitcoinRpcClient, store::{self, account::{AccountStoreRead as _, AccountStoreWrite as _}, block::{BlockStoreRead as _, BlockStoreWrite}, common::{BlockHeight, Script}, txo::{self, TXOStoreRead as _, TXOStoreWrite, TXO, TXOID}, Store, WriteTx}};
+use crate::{bitcoin_rpc::BitcoinRpcClient, store::{account::{AccountStoreRead as _, AccountStoreWrite as _}, block::{BlockStoreRead as _, BlockStoreWrite}, common::BlockHeight, script::TXOStoreWrite, txo::{TXOStoreRead as _, TXOStoreWrite as _, TXO, TXOID}, Store, WriteTx}};
 
 
 pub struct Scanner<'a> {
@@ -102,12 +102,12 @@ impl<'a> Scanner<'a> {
           anyhow::bail!("TXO not found for input: {:?}, {:?}", vin, txoid);
         };
 
-        let prev_balance = block_in_place(||tx.get_recent_balance(&txo.locker_script))?;
+        let prev_balance = block_in_place(||tx.get_recent_balance(txo.locker_script_id))?;
         let new_balance = prev_balance.satoshis.checked_sub(txo.value.into()).ok_or_else(|| anyhow::anyhow!(
           "Negative balance for script {:?}: {:?} - {:?} @ {:?}",
-          txo.locker_script, prev_balance, txo.value, transaction.compute_txid(),
+          txo.locker_script_id, prev_balance, txo.value, transaction.compute_txid(),
         ))?.into();
-        block_in_place(||tx.insert_balance(&txo.locker_script, &height, &new_balance));
+        block_in_place(||tx.insert_balance(txo.locker_script_id, height, &new_balance));
       }
 
       for (vout_index, vout) in transaction.output.iter().enumerate() {
@@ -116,17 +116,19 @@ impl<'a> Scanner<'a> {
           vout: vout_index as u32,
         };
 
-        block_in_place(||tx.insert_txo(&height, &txoid, &TXO {
-          locker_script: vout.script_pubkey.to_bytes().into(),
+        let locker_script_id = block_in_place(||tx.add_script(&vout.script_pubkey.to_bytes().into()))?;
+
+        block_in_place(||tx.insert_txo(height, &txoid, TXO {
+          locker_script_id,
           value: vout.value.to_sat().into(),
         }));
 
-        let prev_balance = block_in_place(||tx.get_recent_balance(&vout.script_pubkey.to_bytes().into()))?;
+        let prev_balance = block_in_place(||tx.get_recent_balance(locker_script_id))?;
         let new_balance = prev_balance.satoshis.checked_add(vout.value.to_sat()).ok_or_else(|| anyhow::anyhow!(
           "Overflow balance for script {:?}: {:?} + {:?} @ {:?}#{:?}",
           vout.script_pubkey, prev_balance, vout.value, height, transaction.compute_txid(),
         ))?.into();
-        block_in_place(||tx.insert_balance(&vout.script_pubkey.to_bytes().into(), &height, &new_balance));
+        block_in_place(||tx.insert_balance(locker_script_id, height, &new_balance));
       }
     }
 

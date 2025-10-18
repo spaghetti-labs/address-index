@@ -1,31 +1,31 @@
 use fjall::Slice;
 
-use crate::{impl_bincode_conversion, store::{common::BlockHeight, ReadTx, TxRead, WriteTx}};
+use crate::{impl_bincode_conversion, store::{common::{BlockHeight, ScriptID}, ReadTx, TxRead, WriteTx}};
 use super::{common::{Amount, CompressedPubKey, PubKeyHash, Script, TransactionID, UncompressedPubKey}};
 
 pub trait AccountStoreRead {
-  fn get_recent_balance(&self, script: &Script) -> anyhow::Result<Amount>;
-  fn get_historical_balance(&self, script: &Script, height: &BlockHeight) -> anyhow::Result<Amount>;
+  fn get_recent_balance(&self, locker_script_id: ScriptID) -> anyhow::Result<Amount>;
+  fn get_historical_balance(&self, locker_script_id: ScriptID, height: BlockHeight) -> anyhow::Result<Amount>;
 }
 
 pub trait AccountStoreWrite {
-  fn insert_balance(&mut self, locker_script: &Script, height: &BlockHeight, balance: &Amount);
+  fn insert_balance(&mut self, locker_script_id: ScriptID, height: BlockHeight, balance: &Amount);
 }
 
 impl<T: TxRead> AccountStoreRead for T {
-  fn get_recent_balance(&self, script: &Script) -> anyhow::Result<Amount> {
-    let Some((last_height, last)) = self.prefix(&self.store().locker_script_and_height_to_balance, Slice::from(script)).rev().next().transpose()? else {
+  fn get_recent_balance(&self, locker_script_id: ScriptID) -> anyhow::Result<Amount> {
+    let Some((last_height, last)) = self.prefix(&self.store().locker_script_id_and_height_to_balance, Slice::from(locker_script_id)).rev().next().transpose()? else {
       return Ok(0.into());
     };
     return Ok(last.into());
   }
 
-  fn get_historical_balance(&self, script: &Script, height: &BlockHeight) -> anyhow::Result<Amount> {
+  fn get_historical_balance(&self, locker_script_id: ScriptID, height: BlockHeight) -> anyhow::Result<Amount> {
     let Some((_, balance)) = self.range(
-      &self.store().locker_script_and_height_to_balance,
-      Slice::from(&LockerScriptAndHeight { locker_script: script.clone(), height: BlockHeight { height: 0 } })
+      &self.store().locker_script_id_and_height_to_balance,
+      Slice::from(&LockerScriptIDAndHeight { locker_script_id, height: BlockHeight { height: 0 } })
         ..=
-        Slice::from(&LockerScriptAndHeight { locker_script: script.clone(), height: *height }),
+        Slice::from(&LockerScriptIDAndHeight { locker_script_id, height }),
     )
       .rev()
       .next()
@@ -37,22 +37,22 @@ impl<T: TxRead> AccountStoreRead for T {
 }
 
 impl AccountStoreWrite for WriteTx<'_> {
-  fn insert_balance(&mut self, locker_script: &Script, height: &BlockHeight, balance: &Amount) {
-    self.tx.insert(&self.store.locker_script_and_height_to_balance, &LockerScriptAndHeight { locker_script: locker_script.clone(), height: *height }, balance);
-    self.tx.insert(&self.store.height_and_locker_script, &HeightAndLockerScript { height: *height, locker_script: locker_script.clone() }, []);
+  fn insert_balance(&mut self, locker_script_id: ScriptID, height: BlockHeight, balance: &Amount) {
+    self.tx.insert(&self.store.locker_script_id_and_height_to_balance, &LockerScriptIDAndHeight { locker_script_id, height }, balance);
+    self.tx.insert(&self.store.height_and_locker_script_id, &HeightAndLockerScriptID { height, locker_script_id }, []);
   }
 }
 
-#[derive(Debug, bincode::Encode, bincode::Decode, Clone)]
-pub struct LockerScriptAndHeight {
-  pub locker_script: Script,
+#[derive(Debug, bincode::Encode, bincode::Decode, Copy, Clone)]
+pub struct LockerScriptIDAndHeight {
+  pub locker_script_id: ScriptID,
   pub height: BlockHeight,
 }
-impl_bincode_conversion!(LockerScriptAndHeight);
+impl_bincode_conversion!(LockerScriptIDAndHeight);
 
-#[derive(Debug, bincode::Encode, bincode::Decode, Clone)]
-pub struct HeightAndLockerScript {
+#[derive(Debug, bincode::Encode, bincode::Decode, Copy, Clone)]
+pub struct HeightAndLockerScriptID {
   pub height: BlockHeight,
-  pub locker_script: Script,
+  pub locker_script_id: ScriptID,
 }
-impl_bincode_conversion!(HeightAndLockerScript);
+impl_bincode_conversion!(HeightAndLockerScriptID);

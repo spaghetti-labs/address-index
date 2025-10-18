@@ -13,10 +13,6 @@ impl BitcoinRpcClient {
     }
   }
 
-  pub async fn getblockchaininfo(&self) -> anyhow::Result<BlockchainInfo> {
-    self.rpc_client.request("getblockchaininfo", ()).await
-  }
-
   pub async fn getblockhash(&self, block_height: u64) -> anyhow::Result<bitcoin::BlockHash> {
     self.rpc_client.request("getblockhash", (block_height,)).await
   }
@@ -37,10 +33,4 @@ impl HexWrapper {
     let bytes = hex::decode(&self.0)?;
     Ok(consensus::deserialize(&bytes)?)
   }
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct BlockchainInfo {
-  pub chain: String,
-  pub blocks: u64,
 }

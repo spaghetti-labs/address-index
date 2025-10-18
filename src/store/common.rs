@@ -26,6 +26,12 @@ macro_rules! impl_bincode_conversion {
         bincode::encode_to_vec(value, crate::store::common::BINCODE_CONFIG).unwrap().into()
       }
     }
+
+    impl From<$type> for fjall::Slice {
+      fn from(value: $type) -> Self {
+        bincode::encode_to_vec(value, crate::store::common::BINCODE_CONFIG).unwrap().into()
+      }
+    }
   };
 }
 
@@ -124,3 +130,12 @@ impl From<bitcoin::Txid> for TransactionID {
     Self { bytes: txid.as_raw_hash().to_byte_array() }
   }
 }
+
+#[derive(bincode::Encode, bincode::Decode, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
+pub struct IntegerID {
+  pub id: u64,
+}
+impl_bincode_conversion!(IntegerID);
+impl_primitive_conversion!(IntegerID, u64, id);
+
+pub type ScriptID = IntegerID;

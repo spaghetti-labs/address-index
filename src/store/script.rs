@@ -1,10 +1,9 @@
 use fjall::Slice;
 
-use crate::{impl_bincode_conversion, store::{common::{BlockHeight, ScriptID}, ReadTx, TxRead, WriteTx}};
-use super::{common::{Amount, CompressedPubKey, PubKeyHash, Script, TransactionID, UncompressedPubKey}};
+use crate::{impl_bincode_conversion, store::{common::{BlockHeight, ScriptID}, TxRead, WriteTx}};
+use super::common::{Amount, Script, TransactionID};
 
 pub trait TXOStoreRead {
-  fn get_script(&self, id: ScriptID) -> anyhow::Result<Option<Script>>;
   fn get_script_id(&self, script: &Script) -> anyhow::Result<Option<ScriptID>>;
 }
 
@@ -13,10 +12,6 @@ pub trait TXOStoreWrite {
 }
 
 impl<T: TxRead> TXOStoreRead for T {
-  fn get_script(&self, id: ScriptID) -> anyhow::Result<Option<Script>> {
-    Ok(self.get(&self.store().script_id_to_script, Slice::from(id))?.map(Into::into))
-  }
-
   fn get_script_id(&self, script: &Script) -> anyhow::Result<Option<ScriptID>> {
     Ok(self.get(&self.store().script_to_script_id, Slice::from(script))?.map(Into::into))
   }

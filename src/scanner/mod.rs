@@ -1,6 +1,5 @@
 use std::convert::Infallible;
-
-use bitcoin::{hashes::Hash, BlockHash};
+use bitcoin::hashes::Hash;
 use futures::{stream, StreamExt};
 use tokio::task::block_in_place;
 
@@ -134,4 +133,11 @@ impl<'a> Scanner<'a> {
 
     Ok(())
   }
+}
+
+pub async fn scan(store: &Store, bitcoin_rpc_client: BitcoinRpcClient) -> anyhow::Result<Infallible> {
+  let scanner = Scanner::open(bitcoin_rpc_client, &store)?;
+  scanner.scan_blocks().await?;
+
+  unreachable!();
 }

@@ -1,7 +1,7 @@
 use fjall::Slice;
 
-use crate::{impl_bincode_conversion, store::{common::{BlockHeight, ScriptID}, ReadTx, TxRead, WriteTx}};
-use super::{common::{Amount, CompressedPubKey, PubKeyHash, Script, TransactionID, UncompressedPubKey}};
+use crate::{impl_bincode_conversion, store::{common::{BlockHeight, ScriptID}, TxRead, WriteTx}};
+use super::common::Amount;
 
 pub trait AccountStoreRead {
   fn get_recent_balance(&self, locker_script_id: ScriptID) -> anyhow::Result<Amount>;
@@ -15,7 +15,7 @@ pub trait AccountStoreWrite {
 
 impl<T: TxRead> AccountStoreRead for T {
   fn get_recent_balance(&self, locker_script_id: ScriptID) -> anyhow::Result<Amount> {
-    let Some((last_height, last)) = self.prefix(&self.store().locker_script_id_and_height_to_balance, Slice::from(locker_script_id)).rev().next().transpose()? else {
+    let Some((_, last)) = self.prefix(&self.store().locker_script_id_and_height_to_balance, Slice::from(locker_script_id)).rev().next().transpose()? else {
       return Ok(0.into());
     };
     return Ok(last.into());

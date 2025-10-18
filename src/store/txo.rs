@@ -1,11 +1,10 @@
 use fjall::Slice;
 
-use crate::{impl_bincode_conversion, store::{common::{BlockHeight, ScriptID}, ReadTx, TxRead, WriteTx}};
-use super::{common::{Amount, CompressedPubKey, PubKeyHash, Script, TransactionID, UncompressedPubKey}};
+use crate::{impl_bincode_conversion, store::{common::{BlockHeight, ScriptID}, TxRead, WriteTx}};
+use super::common::{Amount, TransactionID};
 
 pub trait TXOStoreRead {
   fn get_txo(&self, id: &TXOID) -> anyhow::Result<Option<TXO>>;
-  fn scan_txoids_by_height(&self, height: BlockHeight) -> impl Iterator<Item = anyhow::Result<TXOID>> + '_;
 }
 
 pub trait TXOStoreWrite {
@@ -15,14 +14,6 @@ pub trait TXOStoreWrite {
 impl<T: TxRead> TXOStoreRead for T {
   fn get_txo(&self, id: &TXOID) -> anyhow::Result<Option<TXO>> {
     Ok(self.get(&self.store().txoid_to_txo, Slice::from(id))?.map(Into::into))
-  }
-
-  fn scan_txoids_by_height(&self, height: BlockHeight) -> impl Iterator<Item = anyhow::Result<TXOID>> + '_
-  {
-    self.prefix(&self.store().height_and_txoid, Slice::from(height)).map(|entry| {
-      let (key, _) = entry?;
-      Ok(key.into())
-    })
   }
 }
 

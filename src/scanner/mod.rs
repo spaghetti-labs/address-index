@@ -3,21 +3,21 @@ use bitcoin::hashes::Hash;
 use futures::{stream, StreamExt};
 use tokio::task::block_in_place;
 
-use crate::{bitcoin_rpc::BitcoinRpcClient, store::{account::{AccountStoreRead as _, AccountStoreWrite as _}, block::{BlockStoreRead as _, BlockStoreWrite}, common::BlockHeight, script::TXOStoreWrite, txo::{TXOStoreRead as _, TXOStoreWrite as _, TXO, TXOID}, Store, WriteTx}};
+use crate::{bitcoin_rest::BitcoinRestClient, store::{account::{AccountStoreRead as _, AccountStoreWrite as _}, block::{BlockStoreRead as _, BlockStoreWrite}, common::BlockHeight, script::TXOStoreWrite, txo::{TXOStoreRead as _, TXOStoreWrite as _, TXO, TXOID}, Store, WriteTx}};
 
 
 pub struct Scanner<'a> {
-  bitcoin_rpc: BitcoinRpcClient,
+  bitcoin_client: BitcoinRestClient,
   store: &'a Store,
 }
 
 impl<'a> Scanner<'a> {
   pub fn open(
-    bitcoin_rpc: BitcoinRpcClient,
+    bitcoin_client: BitcoinRestClient,
     store: &'a Store,
   ) -> anyhow::Result<Self> {
     Ok(Self {
-      bitcoin_rpc,
+      bitcoin_client,
       store,
     })
   }
@@ -30,12 +30,12 @@ impl<'a> Scanner<'a> {
 
     let block_height_iter = start_height..;
     let block_hash_stream = stream::iter(block_height_iter).map(|height| async move {
-      let block_hash = self.bitcoin_rpc.getblockhash(height).await?;
+      let block_hash = self.bitcoin_client.get_block_hash(height).await?;
       Ok::<_, anyhow::Error>((height, block_hash))
     }).buffered(4);
     let block_stream = block_hash_stream.map(|res| async move {
       let (height, hash) = res?;
-      let block = self.bitcoin_rpc.getblock(hash).await?;
+      let block = self.bitcoin_client.get_block(&hash).await?;
       if block.header.block_hash() != hash {
         anyhow::bail!("Mismatched block hash for height {}: expected {}, got {}", height, hash, block.header.block_hash());
       }
@@ -135,8 +135,8 @@ impl<'a> Scanner<'a> {
   }
 }
 
-pub async fn scan(store: &Store, bitcoin_rpc_client: BitcoinRpcClient) -> anyhow::Result<Infallible> {
-  let scanner = Scanner::open(bitcoin_rpc_client, &store)?;
+pub async fn scan(store: &Store, bitcoin_client: BitcoinRestClient) -> anyhow::Result<Infallible> {
+  let scanner = Scanner::open(bitcoin_client, &store)?;
   scanner.scan_blocks().await?;
 
   unreachable!();

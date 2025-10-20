@@ -65,10 +65,10 @@ macro_rules! impl_hex_debug {
 
 #[derive(Debug, bincode::Encode, bincode::Decode, Clone, Copy)]
 pub struct BlockHeight {
-  pub height: u64,
+  pub height: u32,
 }
 impl_bincode_conversion!(BlockHeight);
-impl_primitive_conversion!(BlockHeight, u64, height);
+impl_primitive_conversion!(BlockHeight, u32, height);
 
 #[derive(Debug, bincode::Encode, bincode::Decode, Clone, Copy)]
 pub struct Amount {

@@ -77,7 +77,7 @@ impl<'r> ScriptObject<'r> {
     };
     let balance = match height {
       Some(height) => {
-        let height: u64 = height.parse()?;
+        let height: u32 = height.parse()?;
         let block_height = store::common::BlockHeight { height };
         block_in_place(||self.tx.get_historical_balance(script_id, block_height))?
       }

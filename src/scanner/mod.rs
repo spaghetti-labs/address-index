@@ -1,6 +1,7 @@
 use std::convert::Infallible;
+use async_stream::try_stream;
 use bitcoin::hashes::Hash;
-use futures::{stream, StreamExt};
+use futures::StreamExt;
 use tokio::task::block_in_place;
 
 use crate::{bitcoin_rest::BitcoinRestClient, store::{account::{AccountStoreRead as _, AccountStoreWrite as _}, block::{BlockStoreRead as _, BlockStoreWrite}, common::BlockHeight, script::TXOStoreWrite, txo::{TXOStoreRead as _, TXOStoreWrite as _, TXO, TXOID}, Store, WriteTx}};
@@ -28,22 +29,56 @@ impl<'a> Scanner<'a> {
       tx.get_tip_block()
     })?.map_or(0, |(height, _)| height.height + 1);
 
-    let block_height_iter = start_height..;
-    let block_hash_stream = stream::iter(block_height_iter).map(|height| async move {
-      let block_hash = self.bitcoin_client.get_block_hash(height).await?;
-      Ok::<_, anyhow::Error>((height, block_hash))
-    }).buffered(4);
-    let block_stream = block_hash_stream.map(|res| async move {
-      let (height, hash) = res?;
+    let start_hash = self.bitcoin_client.get_block_hash(start_height).await?;
+
+    let hashes = try_stream! {
+      yield start_hash;
+
+      let mut current_hash = start_hash;
+      loop {
+        let Some(last) = ({
+          let headers = self.bitcoin_client.get_headers(&current_hash, 1000).await;
+          tokio::pin!(headers);
+
+          let Some(first) = headers.next().await.transpose()? else {
+            Err(anyhow::format_err!("Missing headers starting from hash {}", current_hash))?;
+            unreachable!();
+          };
+
+          if first.block_hash() != current_hash {
+            Err(anyhow::format_err!(
+              "Unexpected first header: expected header hash {}, got {}",
+              current_hash,
+              first.block_hash()
+            ))?;
+          }
+
+          let mut last = None;
+          while let Some(header) = headers.next().await.transpose()? {
+            yield header.block_hash();
+            last = Some(header);
+          }
+
+          last
+        }) else {
+          break;
+        };
+        current_hash = last.block_hash();
+      }
+    };
+
+    let blocks = hashes.map(|hash: Result<_, anyhow::Error>| async move {
+      let hash = hash?;
       let block = self.bitcoin_client.get_block(&hash).await?;
       if block.header.block_hash() != hash {
-        anyhow::bail!("Mismatched block hash for height {}: expected {}, got {}", height, hash, block.header.block_hash());
+        anyhow::bail!("Mismatched block hash: expected {}, got {}", hash, block.header.block_hash());
       }
-      Ok(block)
-    }).buffered(2);
-    tokio::pin!(block_stream);
+      Ok::<_, anyhow::Error>(block)
+    }).buffered(4);
 
-    while let Some(block) = block_stream.next().await.transpose()? {
+    tokio::pin!(blocks);
+
+    while let Some(block) = blocks.next().await.transpose()? {
       self.scan_block(&block).await?;
       println!("Processed block: {:?}", block.block_hash());
     }

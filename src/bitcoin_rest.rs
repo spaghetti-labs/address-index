@@ -1,4 +1,6 @@
+use async_stream::try_stream;
 use bitcoin::{consensus, BlockHash};
+use futures::Stream;
 
 pub struct BitcoinRestClient {
   client: reqwest::Client,
@@ -30,37 +32,33 @@ impl BitcoinRestClient {
     )?)
   }
 
-  pub async fn get_headers(&self, from_block_hash: &BlockHash, count: usize) -> anyhow::Result<Vec<bitcoin::block::Header>> {
-    let mut binary = self.client.get(format!("{}/rest/headers/{}.bin?count={}", &self.url, from_block_hash, count))
-      .send()
-      .await?
-      .error_for_status()?
-      .bytes()
-      .await?;
+  pub async fn get_headers<'a>(&'a self, from_block_hash: &'a BlockHash, count: usize) -> impl Stream<Item = anyhow::Result<bitcoin::block::Header>> + 'a {
+    try_stream! {
+      let mut binary = self.client.get(format!("{}/rest/headers/{}.bin?count={}", &self.url, from_block_hash, count))
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
 
-    let mut headers: Vec<bitcoin::block::Header> = Vec::with_capacity(count);
+      for _ in 0..count {
+        if binary.is_empty() {
+          break;
+        }
 
-    for _ in 0..count {
-      if binary.is_empty() {
-        break;
+        let (header, size) = consensus::deserialize_partial::<bitcoin::block::Header>(&binary)?;
+        if size == 0 {
+          Err(anyhow::format_err!("Received malformed block header"))?;
+        }
+        binary = binary.slice(size..);
+
+        yield header;
       }
 
-      let (header, size) = consensus::deserialize_partial::<bitcoin::block::Header>(&binary)?;
-      if size == 0 {
-        anyhow::bail!("Received malformed block header");
+      if binary.len() > 0 {
+        Err(anyhow::format_err!("Received more headers than requested"))?;
       }
-      binary = binary.slice(size..);
-
-      headers.push(header);
     }
-
-    if binary.len() > 0 {
-      anyhow::bail!("Received more headers than requested");
-    }
-
-    Ok(consensus::deserialize(&binary).map_err(
-      |e| anyhow::anyhow!("Failed to deserialize block headers: {}", e)
-    )?)
   }
 
   pub async fn get_block_hash(&self, height: u32) -> anyhow::Result<bitcoin::BlockHash> {

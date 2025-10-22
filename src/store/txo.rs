@@ -1,46 +1,73 @@
-use fjall::Slice;
+use binary_layout::prelude::*;
+use bitcoin::{hashes::Hash, Amount, OutPoint};
 
-use crate::{impl_bincode_conversion, store::{common::{BlockHeight, ScriptID}, TxRead, WriteTx}};
-use super::common::{Amount, TransactionID};
+use crate::store::{BlockHeight, TxRead, WriteTx, script::ScriptID};
 
 pub trait TXOStoreRead {
-  fn get_txo(&self, id: &TXOID) -> anyhow::Result<Option<TXO>>;
+  fn get_utxo(&self, outpoint: &OutPoint) -> anyhow::Result<Option<UTXO>>;
 }
 
 pub trait TXOStoreWrite {
-  fn insert_txo(&mut self, height: BlockHeight, txoid: &TXOID, txo: TXO);
+  fn insert_utxo(&mut self, outpoint: &OutPoint, utxo: UTXO);
+  fn remove_utxo(&mut self, outpoint: &OutPoint);
 }
 
 impl<T: TxRead> TXOStoreRead for T {
-  fn get_txo(&self, id: &TXOID) -> anyhow::Result<Option<TXO>> {
-    Ok(self.get(&self.store().txoid_to_txo, Slice::from(id))?.map(Into::into))
+  fn get_utxo(&self, outpoint: &OutPoint) -> anyhow::Result<Option<UTXO>> {
+    let mut key = txo_id::View::new([0u8; txo_id::SIZE.unwrap()]);
+    *key.transaction_id_mut() = outpoint.txid.as_raw_hash().to_byte_array();
+    key.output_index_mut().write(outpoint.vout);
+
+    let Some(utxo) = self.get(&self.store().txoid_to_utxo, key.into_storage())? else {
+      return Ok(None);
+    };
+    let utxo = txo::View::new(utxo);
+    Ok(Some(UTXO {
+      locker_script_id: utxo.locker_script_id().try_read()?,
+      value: Amount::from_sat(utxo.value().try_read()?),
+    }))
   }
 }
 
 impl TXOStoreWrite for WriteTx<'_> {
-  fn insert_txo(&mut self, height: BlockHeight, txoid: &TXOID, txo: TXO) {
-    self.tx.insert(&self.store.txoid_to_txo, txoid, txo);
-    self.tx.insert(&self.store.height_and_txoid, &HeightAndTXOID{ height, txoid: *txoid }, []);
+  fn insert_utxo(&mut self, txoid: &OutPoint, utxo: UTXO) {
+    let mut key = txo_id::View::new([0u8; txo_id::SIZE.unwrap()]);
+    *key.transaction_id_mut() = txoid.txid.as_raw_hash().to_byte_array();
+    key.output_index_mut().write(txoid.vout);
+
+    let mut value = txo::View::new([0u8; txo::SIZE.unwrap()]);
+    value.locker_script_id_mut().write(utxo.locker_script_id);
+    value.value_mut().write(utxo.value.to_sat());
+
+    self.tx.insert(&self.store.txoid_to_utxo, key.into_storage(), value.into_storage());
+  }
+
+  fn remove_utxo(&mut self, txoid: &OutPoint) {
+    let mut key = txo_id::View::new([0u8; txo_id::SIZE.unwrap()]);
+    *key.transaction_id_mut() = txoid.txid.as_raw_hash().to_byte_array();
+    key.output_index_mut().write(txoid.vout);
+
+    self.tx.remove(&self.store.txoid_to_utxo, key.into_storage());
   }
 }
 
-#[derive(Debug, bincode::Encode, bincode::Decode, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub struct TXOID {
-  pub txid: TransactionID,
-  pub vout: u32,
-}
-impl_bincode_conversion!(TXOID);
-
-#[derive(Debug, bincode::Encode, bincode::Decode, Copy, Clone)]
-pub struct TXO {
+#[derive(Clone, Copy)]
+pub struct UTXO {
   pub locker_script_id: ScriptID,
   pub value: Amount,
 }
-impl_bincode_conversion!(TXO);
 
-#[derive(Debug, bincode::Encode, bincode::Decode, Copy, Clone)]
-pub struct HeightAndTXOID {
-  pub height: BlockHeight,
-  pub txoid: TXOID,
-}
-impl_bincode_conversion!(HeightAndTXOID);
+binary_layout!(txo_id, BigEndian, {
+  transaction_id: [u8; 32],
+  output_index: u32,
+});
+
+binary_layout!(txo, BigEndian, {
+  locker_script_id: ScriptID,
+  value: u64
+});
+
+binary_layout!(height_and_txo_id, BigEndian, {
+  height: BlockHeight,
+  txoid: txo_id::NestedView,
+});

@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<Infallible> {
   let store = Arc::new(Store::open(&args.data_dir)?);
 
   select! {
-    res = scan(&store, bitcoin_client) => res?,
+    res = scan(store.clone(), bitcoin_client) => res?,
     res = serve(store.clone()) => res?,
   };
 

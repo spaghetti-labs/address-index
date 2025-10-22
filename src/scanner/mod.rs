@@ -1,21 +1,23 @@
-use std::convert::Infallible;
-use async_stream::try_stream;
-use bitcoin::hashes::Hash;
-use futures::StreamExt;
-use tokio::task::block_in_place;
+mod batch;
+mod layer;
+mod fetch;
 
-use crate::{bitcoin_rest::BitcoinRestClient, store::{account::{AccountStoreRead as _, AccountStoreWrite as _}, block::{BlockStoreRead as _, BlockStoreWrite}, common::BlockHeight, script::TXOStoreWrite, txo::{TXOStoreRead as _, TXOStoreWrite as _, TXO, TXOID}, Store, WriteTx}};
+use std::{convert::Infallible, sync::Arc};
+use futures::{StreamExt, TryStreamExt as _, stream};
+use tokio::{sync::mpsc, task::{block_in_place, spawn_blocking}};
+
+use crate::{bitcoin_rest::BitcoinRestClient, scanner::{batch::Batch, fetch::Fetcher, layer::Layer}, store::{block::BlockStoreRead as _, Store}};
 
 
-pub struct Scanner<'a> {
+pub struct Scanner {
   bitcoin_client: BitcoinRestClient,
-  store: &'a Store,
+  store: Arc<Store>,
 }
 
-impl<'a> Scanner<'a> {
+impl Scanner {
   pub fn open(
     bitcoin_client: BitcoinRestClient,
-    store: &'a Store,
+    store: Arc<Store>,
   ) -> anyhow::Result<Self> {
     Ok(Self {
       bitcoin_client,
@@ -27,151 +29,92 @@ impl<'a> Scanner<'a> {
     let start_height = block_in_place(||{
       let tx = self.store.read_tx();
       tx.get_tip_block()
-    })?.map_or(0, |(height, _)| height.height + 1);
+    })?.map_or(0, |(height, _)| height + 1);
 
     let start_hash = self.bitcoin_client.get_block_hash(start_height).await?;
 
-    let hashes = try_stream! {
-      yield start_hash;
+    let fetcher = Fetcher::new(self.bitcoin_client.clone());
 
-      let mut current_hash = start_hash;
-      loop {
-        let Some(last) = ({
-          let headers = self.bitcoin_client.get_headers(&current_hash, 1000).await;
-          tokio::pin!(headers);
+    let headers = fetcher.prefetch_block_headers(start_hash, 100, num_cpus::get() * 2);
 
-          let Some(first) = headers.next().await.transpose()? else {
-            Err(anyhow::format_err!("Missing headers starting from hash {}", current_hash))?;
-            unreachable!();
-          };
+    let headers = headers.map_ok(|hs| stream::iter(hs.into_iter().map(Ok))).try_flatten();
 
-          if first.block_hash() != current_hash {
-            Err(anyhow::format_err!(
-              "Unexpected first header: expected header hash {}, got {}",
-              current_hash,
-              first.block_hash()
-            ))?;
+    let blocks = fetcher.stream_blocks(headers, 2);
+
+    let blocks_heights = blocks
+      .zip(stream::iter(start_height..))
+      .then(|(block, height): (anyhow::Result<_>, _)| async move {
+        let block = block?;
+        Ok::<_, anyhow::Error>((block, height))
+      });
+
+    let block_chunks = blocks_heights.try_chunks(1000);
+    let block_chunks = {
+      let (sender, mut receiver) = mpsc::channel(num_cpus::get() * 2);
+      tokio::spawn(async move {
+        tokio::pin!(block_chunks);
+
+        while let Some(chunk) = block_chunks.next().await {
+          if let Err(_) = sender.send(chunk).await {
+            break;
           }
-
-          let mut last = None;
-          while let Some(header) = headers.next().await.transpose()? {
-            yield header.block_hash();
-            last = Some(header);
-          }
-
-          last
-        }) else {
-          break;
-        };
-        current_hash = last.block_hash();
-      }
+        }
+      });
+      stream::poll_fn(move |cx| receiver.poll_recv(cx))
     };
 
-    let blocks = hashes.map(|hash: Result<_, anyhow::Error>| async move {
-      let hash = hash?;
-      let block = self.bitcoin_client.get_block(&hash).await?;
-      if block.header.block_hash() != hash {
-        anyhow::bail!("Mismatched block hash: expected {}, got {}", hash, block.header.block_hash());
+    let batches = block_chunks.map(|blocks_heights| tokio::task::spawn_blocking(move || {
+      let blocks_heights = blocks_heights?;
+      let start_height = blocks_heights.first().map(|(_, h)| *h).unwrap();
+      let start_time = std::time::Instant::now();
+      println!("Processing batch starting at height {}", start_height);
+      let blocks = {
+        let mut try_collect = Vec::new();
+        for (block, _) in blocks_heights {
+          try_collect.push(block()?);
+        }
+        try_collect
+      };
+      let batch = Batch::build(start_height, &blocks)?;
+      let elapsed = start_time.elapsed();
+      println!("Batch processing took: {:?}", elapsed);
+      Ok::<_, anyhow::Error>(batch)
+    })).buffered(num_cpus::get());
+
+    let store = self.store.clone();
+
+    tokio::spawn(async move {
+      tokio::pin!(batches);
+
+      while let Some(batch) = batches.next().await.transpose()? {
+        let batch = batch?;
+        let end_height = batch.end_height;
+        let store = store.clone();
+        println!("Writing batch starting at height {} to store", batch.start_height);
+        spawn_blocking(move || {
+          let mut tx = store.write_tx();
+          let start_time = std::time::Instant::now();
+          let layer = Layer::build(&mut tx, batch)?;
+          let elapsed = start_time.elapsed();
+          println!("Building layer took: {:?}", elapsed);
+          let start_time = std::time::Instant::now();
+          layer.write()?;
+          let result = tx.commit();
+          let elapsed = start_time.elapsed();
+          println!("Saving transaction took: {:?}", elapsed);
+          result
+        }).await??;
+        println!("Scanned blocks up to {}", end_height);
       }
-      Ok::<_, anyhow::Error>(block)
-    }).buffered(4);
-
-    tokio::pin!(blocks);
-
-    while let Some(block) = blocks.next().await.transpose()? {
-      self.scan_block(&block).await?;
-      println!("Processed block: {:?}", block.block_hash());
-    }
+      Ok::<(), anyhow::Error>(())
+    }).await??;
 
     unreachable!();
   }
-
-  async fn scan_block(&self, next_block: &bitcoin::Block) -> anyhow::Result<()> {
-    let mut tx = self.store.write_tx();
-
-    let next_block_height = match tx.get_tip_block()? {
-      Some((tip_height, tip_hash)) => {
-        if tip_hash.bytes != next_block.header.prev_blockhash.to_byte_array() {
-          anyhow::bail!(
-            "Reorg detected at height {:?}: expected previous block hash {:?}, got {:?}",
-            tip_height.height + 1,
-            tip_hash,
-            next_block.header.prev_blockhash
-          );
-        }
-        tip_height.height + 1
-      },
-      None => {
-        if next_block.header.prev_blockhash != bitcoin::BlockHash::all_zeros() {
-          anyhow::bail!(
-            "Genesis block must have previous block hash of all zeros, got {:?}",
-            next_block.header.prev_blockhash
-          );
-        }
-        0
-      }
-    };
-
-    self.scan_block_transactions(&next_block, next_block_height.into(), &mut tx).await?;
-
-    block_in_place(||tx.insert_block(&next_block.block_hash().to_raw_hash().to_byte_array().into(), &next_block_height.into()));
-
-    block_in_place(||tx.commit())?;
-
-    Ok(())
-  }
-
-  async fn scan_block_transactions(&self, block: &bitcoin::Block, height: BlockHeight, tx: &mut WriteTx<'_>) -> anyhow::Result<()> {
-    for transaction in &block.txdata {
-      for vin in &transaction.input {
-        if vin.previous_output.is_null() {
-          continue;
-        }
-        let txoid = TXOID {
-          txid: vin.previous_output.txid.into(),
-          vout: vin.previous_output.vout,
-        };
-
-        let Some(txo) = block_in_place(||tx.get_txo(&txoid))? else {
-          anyhow::bail!("TXO not found for input: {:?}, {:?}", vin, txoid);
-        };
-
-        let prev_balance = block_in_place(||tx.get_recent_balance(txo.locker_script_id))?;
-        let new_balance = prev_balance.satoshis.checked_sub(txo.value.into()).ok_or_else(|| anyhow::anyhow!(
-          "Negative balance for script {:?}: {:?} - {:?} @ {:?}",
-          txo.locker_script_id, prev_balance, txo.value, transaction.compute_txid(),
-        ))?.into();
-        block_in_place(||tx.insert_balance(txo.locker_script_id, height, &new_balance));
-      }
-
-      for (vout_index, vout) in transaction.output.iter().enumerate() {
-        let txoid = TXOID {
-          txid: transaction.compute_txid().into(),
-          vout: vout_index as u32,
-        };
-
-        let locker_script_id = block_in_place(||tx.add_script(&vout.script_pubkey.to_bytes().into()))?;
-
-        block_in_place(||tx.insert_txo(height, &txoid, TXO {
-          locker_script_id,
-          value: vout.value.to_sat().into(),
-        }));
-
-        let prev_balance = block_in_place(||tx.get_recent_balance(locker_script_id))?;
-        let new_balance = prev_balance.satoshis.checked_add(vout.value.to_sat()).ok_or_else(|| anyhow::anyhow!(
-          "Overflow balance for script {:?}: {:?} + {:?} @ {:?}#{:?}",
-          vout.script_pubkey, prev_balance, vout.value, height, transaction.compute_txid(),
-        ))?.into();
-        block_in_place(||tx.insert_balance(locker_script_id, height, &new_balance));
-      }
-    }
-
-    Ok(())
-  }
 }
 
-pub async fn scan(store: &Store, bitcoin_client: BitcoinRestClient) -> anyhow::Result<Infallible> {
-  let scanner = Scanner::open(bitcoin_client, &store)?;
+pub async fn scan(store: Arc<Store>, bitcoin_client: BitcoinRestClient) -> anyhow::Result<Infallible> {
+  let scanner = Scanner::open(bitcoin_client, store)?;
   scanner.scan_blocks().await?;
 
   unreachable!();

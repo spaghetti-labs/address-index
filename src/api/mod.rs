@@ -1,9 +1,10 @@
 use std::{convert::Infallible, str::FromStr, sync::Arc};
+use bitcoin::{Amount, ScriptBuf};
 use juniper::{graphql_object, EmptyMutation, EmptySubscription, RootNode};
 use rocket::{response::content::RawHtml, routes, State};
 use tokio::task::block_in_place;
 
-use crate::store::{self, account::AccountStoreRead, block::BlockStoreRead, common::{Amount, BlockHeight, ScriptID}, script::TXOStoreRead, Store};
+use crate::store::{self, account::AccountStoreRead, block::BlockStoreRead, BlockHeight, script::{ScriptID, ScriptStoreRead}, Store};
 
 pub async fn serve<'a>(store: Arc<Store>) -> anyhow::Result<Infallible> {
   _ = rocket::build()
@@ -46,7 +47,7 @@ struct Query<'r> {
 #[graphql_object(rename_all = "none")]
 impl<'r> Query<'r> {
   async fn height(&self) -> anyhow::Result<i32> {
-    Ok(block_in_place(||self.tx.get_tip_block())?.map_or(0, |(height, _)| height.height as i32))
+    Ok(block_in_place(||self.tx.get_tip_block())?.map_or(0, |(height, _)| height as i32))
   }
 
   async fn locker_script(&self, hex: Option<String>, address: Option<String>) -> anyhow::Result<ScriptObject<'r>> {
@@ -58,7 +59,7 @@ impl<'r> Query<'r> {
       }
       _ => return Err(anyhow::anyhow!("either hex or address must be provided")),
     };
-    let script = store::common::Script::from(script_bytes);
+    let script = ScriptBuf::from_bytes(script_bytes.clone());
     let script_id = block_in_place(||self.tx.get_script_id(&script))?;
     Ok(ScriptObject { tx: self.tx, script_id })
   }
@@ -77,15 +78,14 @@ impl<'r> ScriptObject<'r> {
     };
     let balance = match height {
       Some(height) => {
-        let height: u32 = height.parse()?;
-        let block_height = store::common::BlockHeight { height };
-        block_in_place(||self.tx.get_historical_balance(script_id, block_height))?
+        let height: BlockHeight = height.parse()?;
+        block_in_place(||self.tx.get_historical_balance(script_id, height))?
       }
       None => {
         block_in_place(||self.tx.get_recent_balance(script_id))?
       }
     };
-    Ok(balance.satoshis.to_string())
+    Ok(balance.to_sat().to_string())
   }
 
   async fn balance_history(&self) -> anyhow::Result<Vec<HistoricalBalance>> {
@@ -108,10 +108,10 @@ struct HistoricalBalance {
 #[graphql_object(rename_all = "none")]
 impl HistoricalBalance {
   pub fn height(&self) -> String {
-    self.height.height.to_string()
+    self.height.to_string()
   }
 
   pub fn balance(&self) -> String {
-    self.balance.satoshis.to_string()
+    self.balance.to_sat().to_string()
   }
 }

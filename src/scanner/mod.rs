@@ -66,19 +66,16 @@ impl Scanner {
     let batches = block_chunks.map(|blocks_heights| tokio::task::spawn_blocking(move || {
       let blocks_heights = blocks_heights?;
       let start_height = blocks_heights.first().map(|(_, h)| *h).unwrap();
-      let start_time = std::time::Instant::now();
-      println!("Processing batch starting at height {}", start_height);
-      let blocks = {
-        let mut try_collect = Vec::new();
-        for (block, _) in blocks_heights {
-          try_collect.push(block()?);
-        }
-        try_collect
-      };
-      let batch = Batch::build(start_height, &blocks)?;
-      let elapsed = start_time.elapsed();
-      println!("Batch processing took: {:?}", elapsed);
-      Ok::<_, anyhow::Error>(batch)
+      tracing::trace_span!("building_batch", start_height).in_scope(|| {
+        let blocks = {
+          let mut try_collect = Vec::new();
+          for (block, _) in blocks_heights {
+            try_collect.push(block()?);
+          }
+          try_collect
+        };
+        Batch::build(start_height, &blocks)
+      })
     })).buffered(num_cpus::get());
 
     let store = self.store.clone();
@@ -88,22 +85,22 @@ impl Scanner {
 
       while let Some(batch) = batches.next().await.transpose()? {
         let batch = batch?;
+        let start_height = batch.start_height;
         let end_height = batch.end_height;
         let store = store.clone();
-        println!("Writing batch starting at height {} to store", batch.start_height);
         spawn_blocking(move || {
           let mut tx = store.write_tx();
-          let start_time = std::time::Instant::now();
-          let layer = Layer::build(&mut tx, batch)?;
-          let elapsed = start_time.elapsed();
-          println!("Building layer took: {:?}", elapsed);
-          let start_time = std::time::Instant::now();
-          layer.write()?;
-          let result = tx.commit();
-          let elapsed = start_time.elapsed();
-          println!("Saving transaction took: {:?}", elapsed);
-          result
+          let layer = tracing::trace_span!("building_layer", start_height).in_scope(|| {
+            Layer::build(&mut tx, batch)
+          })?;
+          tracing::trace_span!("saving_layer", start_height).in_scope(|| {
+            layer.write()
+          })?;
+          tracing::trace_span!("committing_tx", start_height).in_scope(|| {
+            tx.commit()
+          })
         }).await??;
+
         println!("Scanned blocks up to {}", end_height);
       }
       Ok::<(), anyhow::Error>(())

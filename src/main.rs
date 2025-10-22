@@ -21,6 +21,13 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<Infallible> {
+  tracing_subscriber::fmt::fmt()
+    .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+    .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+    .with_target(false)
+    .with_level(false)
+    .init();
+
   let args = Args::try_parse()?;
 
   let bitcoin_client = BitcoinRestClient::new(args.rest_url);

@@ -6,7 +6,7 @@ use std::{convert::Infallible, sync::Arc};
 use futures::{StreamExt, TryStreamExt as _, stream};
 use tokio::{sync::mpsc, task::{block_in_place, spawn_blocking}};
 
-use crate::{bitcoin_rest::BitcoinRestClient, scanner::{batch::Batch, fetch::Fetcher, layer::Layer}, store::{block::BlockStoreRead as _, Store}};
+use crate::{bitcoin_rest::BitcoinRestClient, scanner::{batch::Batch, fetch::Fetcher, layer::Layer}, store::{self, block::BlockStoreRead as _, Store}};
 
 
 pub struct Scanner {
@@ -26,16 +26,17 @@ impl Scanner {
   }
 
   pub async fn scan_blocks(&self) -> anyhow::Result<Infallible> {
+    let concurrency = num_cpus::get();
+
     let start_height = block_in_place(||{
-      let tx = self.store.read_tx();
-      tx.get_tip_block()
+      self.store.get_tip_block()
     })?.map_or(0, |(height, _)| height + 1);
 
     let start_hash = self.bitcoin_client.get_block_hash(start_height).await?;
 
     let fetcher = Fetcher::new(self.bitcoin_client.clone());
 
-    let headers = fetcher.prefetch_block_headers(start_hash, 100, num_cpus::get() * 2);
+    let headers = fetcher.prefetch_block_headers(start_hash, 100, concurrency);
 
     let headers = headers.map_ok(|hs| stream::iter(hs.into_iter().map(Ok))).try_flatten();
 
@@ -48,9 +49,9 @@ impl Scanner {
         Ok::<_, anyhow::Error>((block, height))
       });
 
-    let block_chunks = blocks_heights.try_chunks(1000);
+    let block_chunks = blocks_heights.try_chunks(100);
     let block_chunks = {
-      let (sender, mut receiver) = mpsc::channel(num_cpus::get() * 2);
+      let (sender, mut receiver) = mpsc::channel(concurrency);
       tokio::spawn(async move {
         tokio::pin!(block_chunks);
 
@@ -66,7 +67,7 @@ impl Scanner {
     let batches = block_chunks.map(|blocks_heights| tokio::task::spawn_blocking(move || {
       let blocks_heights = blocks_heights?;
       let start_height = blocks_heights.first().map(|(_, h)| *h).unwrap();
-      tracing::trace_span!("building_batch", start_height).in_scope(|| {
+      tracing::trace_span!("building_batch").in_scope(|| {
         let blocks = {
           let mut try_collect = Vec::new();
           for (block, _) in blocks_heights {
@@ -76,7 +77,7 @@ impl Scanner {
         };
         Batch::build(start_height, &blocks)
       })
-    })).buffered(num_cpus::get());
+    })).buffered(concurrency);
 
     let store = self.store.clone();
 
@@ -89,15 +90,14 @@ impl Scanner {
         let end_height = batch.end_height;
         let store = store.clone();
         spawn_blocking(move || {
-          let mut tx = store.write_tx();
-          let layer = tracing::trace_span!("building_layer", start_height).in_scope(|| {
-            Layer::build(&mut tx, batch)
-          })?;
-          tracing::trace_span!("saving_layer", start_height).in_scope(|| {
-            layer.write()
-          })?;
-          tracing::trace_span!("committing_tx", start_height).in_scope(|| {
-            tx.commit()
+          tracing::trace_span!("processing_batch").in_scope(|| {
+            let mut tx = store::Batch {
+              store: &store,
+              batch: store.keyspace.batch(),
+            };
+            let layer = Layer::build(&mut tx, batch)?;
+            layer.write()?;
+            tracing::trace_span!("commit").in_scope(|| tx.batch.commit().map_err(|e| anyhow::format_err!("Failed to commit batch at height {}: {}", start_height, e)))
           })
         }).await??;
 

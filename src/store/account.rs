@@ -2,9 +2,9 @@ use binary_layout::prelude::*;
 use bitcoin::Amount;
 use fjall::Slice;
 
-use crate::store::script::ScriptID;
+use crate::{store::script::ScriptID};
 
-use super::{BlockHeight, TxRead, WriteTx};
+use super::{BlockHeight, Batch, Store};
 
 pub trait AccountStoreRead {
   fn get_recent_balance(&self, locker_script_id: ScriptID) -> anyhow::Result<Amount>;
@@ -13,15 +13,16 @@ pub trait AccountStoreRead {
 }
 
 pub trait AccountStoreWrite {
+  fn insert_recent_balance(&mut self, locker_script_id: ScriptID, balance: Amount);
   fn insert_historical_balance(&mut self, locker_script_id: ScriptID, height: BlockHeight, balance: Amount);
 }
 
-impl<T: TxRead> AccountStoreRead for T {
+impl AccountStoreRead for Store {
   fn get_recent_balance(&self, locker_script_id: ScriptID) -> anyhow::Result<Amount> {
-    let Some((_, last)) = self.prefix(&self.store().locker_script_id_and_height_to_balance, locker_script_id.to_be_bytes()).rev().next().transpose()? else {
+    let Some(balance) = self.locker_script_id_to_balance.get(locker_script_id.to_be_bytes())? else {
       return Ok(Amount::ZERO);
     };
-    return Ok(Amount::from_sat(u64::from_be_bytes(last.as_ref().try_into()?)));
+    Ok(Amount::from_sat(u64::from_be_bytes(balance.as_ref().try_into()?)))
   }
 
   fn get_historical_balance(&self, locker_script_id: ScriptID, height: BlockHeight) -> anyhow::Result<Amount> {
@@ -33,8 +34,7 @@ impl<T: TxRead> AccountStoreRead for T {
     target.locker_script_id_mut().write(locker_script_id);
     target.height_mut().write(height);
 
-    let Some((_, balance)) = self.range(
-      &self.store().locker_script_id_and_height_to_balance,
+    let Some((_, balance)) = self.locker_script_id_and_height_to_balance.range(
       genesis.into_storage()..=target.into_storage(),
     )
       .rev()
@@ -47,8 +47,7 @@ impl<T: TxRead> AccountStoreRead for T {
 
   fn get_balance_history(&self, locker_script_id: ScriptID) -> anyhow::Result<Vec<(BlockHeight, Amount)>> {
     let mut historical_balances = Vec::new();
-    for entry in self.prefix(
-      &self.store().locker_script_id_and_height_to_balance, 
+    for entry in self.locker_script_id_and_height_to_balance.prefix(
       locker_script_id.to_be_bytes(),
     ) {
       let (key, balance) = entry?;
@@ -59,7 +58,11 @@ impl<T: TxRead> AccountStoreRead for T {
   }
 }
 
-impl AccountStoreWrite for WriteTx<'_> {
+impl AccountStoreWrite for Batch<'_> {
+  fn insert_recent_balance(&mut self, locker_script_id: ScriptID, balance: Amount) {
+    self.batch.insert(&self.store.locker_script_id_to_balance, locker_script_id.to_be_bytes(), balance.to_sat().to_be_bytes());
+  }
+
   fn insert_historical_balance(&mut self, locker_script_id: ScriptID, height: BlockHeight, balance: Amount) {
     let mut key = locker_script_id_and_height::View::new([0u8; locker_script_id_and_height::SIZE.unwrap()]);
     key.locker_script_id_mut().write(locker_script_id);
@@ -69,8 +72,8 @@ impl AccountStoreWrite for WriteTx<'_> {
     reverse_key.height_mut().write(height);
     reverse_key.locker_script_id_mut().write(locker_script_id);
 
-    self.tx.insert(&self.store.locker_script_id_and_height_to_balance, Slice::new(key.into_storage().as_ref()), balance.to_sat().to_be_bytes());
-    self.tx.insert(&self.store.height_and_locker_script_id, reverse_key.into_storage(), []);
+    self.batch.insert(&self.store.locker_script_id_and_height_to_balance, Slice::new(key.into_storage().as_ref()), balance.to_sat().to_be_bytes());
+    self.batch.insert(&self.store.height_and_locker_script_id, reverse_key.into_storage(), []);
   }
 }
 

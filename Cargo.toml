@@ -15,7 +15,7 @@ serde_json = "1.0.145"
 reqwest = { version = "0.12.23", features = ["json"] }
 hex = "0.4.3"
 bigdecimal = { version = "0.4.8", features = ["serde", "serde_json"] }
-fjall = { version = "2.11.2", default_features = false, features = ["single_writer_tx"] }
+fjall = { version = "2.11.2", default_features = false }
 bitcoin_hashes = "0.16.0"
 secp256k1 = "0.31.1"
 byteorder = "1.5.0"
@@ -27,5 +27,9 @@ juniper_rocket = "0.10.0"
 async-stream = "0.3.6"
 num_cpus = "1.17.0"
 binary-layout = "4.0.2"
+opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.32.0"
 tracing = "0.1.41"
+opentelemetry_sdk = "0.31.0"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+opentelemetry = "0.31.0"

@@ -1,7 +1,7 @@
 use binary_layout::prelude::*;
 use bitcoin::{hashes::Hash, Amount, OutPoint};
 
-use crate::store::{BlockHeight, TxRead, WriteTx, script::ScriptID};
+use crate::store::{BlockHeight, Batch, Store, script::ScriptID};
 
 pub trait TXOStoreRead {
   fn get_utxo(&self, outpoint: &OutPoint) -> anyhow::Result<Option<UTXO>>;
@@ -12,13 +12,13 @@ pub trait TXOStoreWrite {
   fn remove_utxo(&mut self, outpoint: &OutPoint);
 }
 
-impl<T: TxRead> TXOStoreRead for T {
+impl TXOStoreRead for Store {
   fn get_utxo(&self, outpoint: &OutPoint) -> anyhow::Result<Option<UTXO>> {
     let mut key = txo_id::View::new([0u8; txo_id::SIZE.unwrap()]);
     *key.transaction_id_mut() = outpoint.txid.as_raw_hash().to_byte_array();
     key.output_index_mut().write(outpoint.vout);
 
-    let Some(utxo) = self.get(&self.store().txoid_to_utxo, key.into_storage())? else {
+    let Some(utxo) = self.txoid_to_utxo.get(key.into_storage())? else {
       return Ok(None);
     };
     let utxo = txo::View::new(utxo);
@@ -29,7 +29,7 @@ impl<T: TxRead> TXOStoreRead for T {
   }
 }
 
-impl TXOStoreWrite for WriteTx<'_> {
+impl TXOStoreWrite for Batch<'_> {
   fn insert_utxo(&mut self, txoid: &OutPoint, utxo: UTXO) {
     let mut key = txo_id::View::new([0u8; txo_id::SIZE.unwrap()]);
     *key.transaction_id_mut() = txoid.txid.as_raw_hash().to_byte_array();
@@ -39,7 +39,7 @@ impl TXOStoreWrite for WriteTx<'_> {
     value.locker_script_id_mut().write(utxo.locker_script_id);
     value.value_mut().write(utxo.value.to_sat());
 
-    self.tx.insert(&self.store.txoid_to_utxo, key.into_storage(), value.into_storage());
+    self.batch.insert(&self.store.txoid_to_utxo, key.into_storage(), value.into_storage());
   }
 
   fn remove_utxo(&mut self, txoid: &OutPoint) {
@@ -47,7 +47,7 @@ impl TXOStoreWrite for WriteTx<'_> {
     *key.transaction_id_mut() = txoid.txid.as_raw_hash().to_byte_array();
     key.output_index_mut().write(txoid.vout);
 
-    self.tx.remove(&self.store.txoid_to_utxo, key.into_storage());
+    self.batch.remove(&self.store.txoid_to_utxo, key.into_storage());
   }
 }
 

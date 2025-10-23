@@ -19,7 +19,7 @@ fjall = { version = "2.11.2", default_features = false }
 bitcoin_hashes = "0.16.0"
 secp256k1 = "0.31.1"
 byteorder = "1.5.0"
-bitcoin = { version = "0.32.7", features = ["serde"] }
+bitcoin = { version = "0.32.7", features = ["serde", "rand"] }
 futures = "0.3.31"
 juniper = { version = "0.17.0", features = ["anyhow"] }
 rocket = "0.5.1"
@@ -33,3 +33,4 @@ tracing = "0.1.41"
 opentelemetry_sdk = "0.31.0"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 opentelemetry = "0.31.0"
+rand = "0.9.2"

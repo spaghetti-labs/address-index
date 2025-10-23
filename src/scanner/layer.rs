@@ -1,8 +1,8 @@
 use std::collections::{btree_map, BTreeMap, HashMap};
-use bitcoin::{OutPoint, ScriptBuf};
+use bitcoin::{ScriptBuf, ScriptHash};
 use tracing::instrument;
 
-use crate::{hash::{CollidingOutPoint, CollidingScriptBuf, XORHashBuilder}, store::{self, account::{AccountStoreRead, AccountStoreWrite}, block::{BlockStoreRead, BlockStoreWrite}, script::{ScriptID, ScriptStoreRead, ScriptStoreWrite}, txo::{TXOStoreRead as _, TXOStoreWrite as _, UTXO}, BlockHeight}};
+use crate::{hash::{CollidingOutPoint, CollidingScriptHash, LazyHasherBuilder}, store::{self, account::{AccountStoreRead, AccountStoreWrite}, block::{BlockStoreRead, BlockStoreWrite}, txo::{TXOStoreRead as _, TXOStoreWrite as _, UTXO}, BlockHeight}};
 use super::batch;
 
 
@@ -13,10 +13,10 @@ pub struct Layer<'a, 'b> {
   end_height: BlockHeight,
   blocks: Vec<bitcoin::BlockHash>,
 
-  unspent_txos: HashMap<CollidingOutPoint, UTXO, XORHashBuilder>,
-  spent_txos: HashMap<CollidingOutPoint, BlockHeight, XORHashBuilder>,
-  account_histories: HashMap<ScriptID, BTreeMap<BlockHeight, bitcoin::Amount>, XORHashBuilder>,
-  account_states: HashMap<ScriptID, bitcoin::Amount, XORHashBuilder>,
+  unspent_txos: HashMap<CollidingOutPoint, UTXO, LazyHasherBuilder>,
+  spent_txos: HashMap<CollidingOutPoint, BlockHeight, LazyHasherBuilder>,
+  account_histories: HashMap<CollidingScriptHash, BTreeMap<BlockHeight, bitcoin::Amount>, LazyHasherBuilder>,
+  account_states: HashMap<CollidingScriptHash, bitcoin::Amount, LazyHasherBuilder>,
 }
 
 impl<'a, 'b> Layer<'a, 'b> {
@@ -30,10 +30,10 @@ impl<'a, 'b> Layer<'a, 'b> {
       start_height: batch.start_height,
       end_height: batch.end_height,
       blocks: batch.blocks,
-      unspent_txos: HashMap::with_capacity_and_hasher(batch.unspent_txos.len(), XORHashBuilder::new()), // will grow un-likely
-      account_histories: HashMap::with_capacity_and_hasher(batch.intermediate_account_changes.len(), XORHashBuilder::new()), // will grow likely
+      unspent_txos: HashMap::with_capacity_and_hasher(batch.unspent_txos.len(), LazyHasherBuilder::new()), // will grow un-likely
+      account_histories: HashMap::with_capacity_and_hasher(batch.intermediate_account_changes.len(), LazyHasherBuilder::new()), // will grow likely
       spent_txos: batch.spent_txos,
-      account_states: HashMap::with_capacity_and_hasher(batch.intermediate_account_changes.len(), XORHashBuilder::new()), // will grow likely
+      account_states: HashMap::with_capacity_and_hasher(batch.intermediate_account_changes.len(), LazyHasherBuilder::new()), // will grow likely
     };
 
     match layer.store.store.get_tip_block()? {
@@ -53,35 +53,10 @@ impl<'a, 'b> Layer<'a, 'b> {
       _ => {}
     }
 
-    let mut script_id_cache = BTreeMap::new();
-    tracing::trace_span!("Layer::build::script_id_cache").in_scope(|| -> anyhow::Result<()> {
-      for (script, _) in &batch.intermediate_account_changes {
-        let btree_map::Entry::Vacant(entry) = script_id_cache.entry(script.clone()) else {
-          continue;
-        };
-        entry.insert(layer.store.use_script_id(script.as_ref())?);
-      }
-      for (_, utxo) in &batch.unspent_txos {
-        let btree_map::Entry::Vacant(entry) = script_id_cache.entry(utxo.script_pubkey.clone().into()) else {
-          continue;
-        };
-        entry.insert(layer.store.use_script_id(&utxo.script_pubkey)?);
-      }
-      Ok(())
-    })?;
-    let use_script_id = |script: &CollidingScriptBuf| -> anyhow::Result<ScriptID> {
-      let Some(id) = script_id_cache.get(script).cloned() else {
-        anyhow::bail!("ScriptID cache miss");
-      };
-      Ok(id)
-    };
-
-
     let mut account_changes = BTreeMap::new();
     tracing::trace_span!("Layer::build::account_changes").in_scope(|| -> anyhow::Result<()> {
-      for (script, changes) in batch.intermediate_account_changes {
-        let script_id = use_script_id(&script)?;
-        let account_changes = account_changes.entry(script_id).or_insert_with(|| BTreeMap::new());
+      for (script_hash, changes) in batch.intermediate_account_changes {
+        let account_changes = account_changes.entry(script_hash).or_insert_with(|| BTreeMap::new());
         for (height, change) in changes {
           *account_changes.entry(height)
             .or_insert(bitcoin::SignedAmount::ZERO) += change;
@@ -92,11 +67,11 @@ impl<'a, 'b> Layer<'a, 'b> {
 
     tracing::trace_span!("Layer::build::unspent_txos").in_scope(|| -> anyhow::Result<()> {
       for (outpoint, utxo) in batch.unspent_txos {
-        let locker_script_id = use_script_id(&utxo.script_pubkey.into())?;
+        let locker_script_hash = utxo.script_pubkey.script_hash();
         layer.unspent_txos.insert(
           outpoint.clone(),
           UTXO {
-            locker_script_id,
+            locker_script_hash,
             value: utxo.value,
           },
         );
@@ -110,7 +85,7 @@ impl<'a, 'b> Layer<'a, 'b> {
           anyhow::bail!("Attempting to spend non-existent (or spent) TXO {}", outpoint.as_ref());
         };
         *account_changes
-          .entry(txo.locker_script_id).or_insert_with(|| BTreeMap::new())
+          .entry(txo.locker_script_hash.into()).or_insert_with(|| BTreeMap::new())
           .entry(*spent_height).or_insert(bitcoin::SignedAmount::ZERO)
           -= txo.value.try_into()?;
       }
@@ -118,23 +93,23 @@ impl<'a, 'b> Layer<'a, 'b> {
     })?;
 
     tracing::trace_span!("Layer::build::account_states").in_scope(|| -> anyhow::Result<()> {
-      for script_id in account_changes.keys().copied() {
-        let current_balance = layer.store.store.get_recent_balance(script_id)?;
-        layer.account_states.insert(script_id, current_balance);
+      for script_hash in account_changes.keys().copied() {
+        let current_balance = layer.store.store.get_recent_balance(&script_hash.into())?;
+        layer.account_states.insert(script_hash, current_balance);
       }
       Ok(())
     })?;
 
     tracing::trace_span!("Layer::build::account_histories").in_scope(|| -> anyhow::Result<()> {
-      for (script_id, changes) in account_changes {
-        let account_histories = layer.account_histories.entry(script_id).or_insert_with(|| BTreeMap::new());
-        let state = layer.account_states.entry(script_id).or_insert(bitcoin::Amount::ZERO);
+      for (script_hash, changes) in account_changes {
+        let account_histories = layer.account_histories.entry(script_hash).or_insert_with(|| BTreeMap::new());
+        let state = layer.account_states.entry(script_hash).or_insert(bitcoin::Amount::ZERO);
         for (height, change) in changes {
           *state = {
             let mut signed = bitcoin::SignedAmount::try_from(*state)?;
             signed += change;
             signed.try_into().map_err(
-              |_| anyhow::format_err!("Negative balance for script {:?} at height {}", layer.store.store.get_script(script_id), height)
+              |_| anyhow::format_err!("Negative balance for script hash {:?} at height {}", Into::<ScriptHash>::into(script_hash), height)
             )?
           };
           account_histories.insert(height, state.clone());
@@ -142,6 +117,11 @@ impl<'a, 'b> Layer<'a, 'b> {
       }
       Ok(())
     })?;
+
+    tracing::Span::current().record("num_blocks", layer.blocks.len());
+    tracing::Span::current().record("num_unspent_txos", layer.unspent_txos.len());
+    tracing::Span::current().record("num_spent_txos", layer.spent_txos.len());
+    tracing::Span::current().record("num_account_histories", layer.account_histories.len());
 
     Ok(layer)
   }
@@ -161,14 +141,14 @@ impl<'a, 'b> Layer<'a, 'b> {
       self.store.insert_utxo(outpoint.as_ref(), txo);
     }
 
-    for (script_id, history) in self.account_histories {
+    for (script_hash, history) in self.account_histories {
       for (height, balance) in history {
-        self.store.insert_historical_balance(script_id, height, balance);
+        self.store.insert_historical_balance(&script_hash.into(), height, balance);
       }
     }
 
-    for (script_id, balance) in self.account_states {
-      self.store.insert_recent_balance(script_id, balance);
+    for (script_hash, balance) in self.account_states {
+      self.store.insert_recent_balance(&script_hash.into(), balance);
     }
 
     Ok(())

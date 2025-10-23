@@ -1,7 +1,7 @@
 use binary_layout::prelude::*;
-use bitcoin::{hashes::Hash, Amount, OutPoint};
+use bitcoin::{hashes::Hash, Amount, OutPoint, ScriptHash};
 
-use crate::store::{BlockHeight, Batch, Store, script::ScriptID};
+use crate::store::{BlockHeight, Batch, Store};
 
 pub trait TXOStoreRead {
   fn get_utxo(&self, outpoint: &OutPoint) -> anyhow::Result<Option<UTXO>>;
@@ -23,7 +23,7 @@ impl TXOStoreRead for Store {
     };
     let utxo = txo::View::new(utxo);
     Ok(Some(UTXO {
-      locker_script_id: utxo.locker_script_id().try_read()?,
+      locker_script_hash: ScriptHash::from_byte_array(utxo.locker_script_hash().clone()),
       value: Amount::from_sat(utxo.value().try_read()?),
     }))
   }
@@ -36,7 +36,7 @@ impl TXOStoreWrite for Batch<'_> {
     key.output_index_mut().write(txoid.vout);
 
     let mut value = txo::View::new([0u8; txo::SIZE.unwrap()]);
-    value.locker_script_id_mut().write(utxo.locker_script_id);
+    *value.locker_script_hash_mut() = utxo.locker_script_hash.to_byte_array();
     value.value_mut().write(utxo.value.to_sat());
 
     self.batch.insert(&self.store.txoid_to_utxo, key.into_storage(), value.into_storage());
@@ -53,7 +53,7 @@ impl TXOStoreWrite for Batch<'_> {
 
 #[derive(Clone, Copy)]
 pub struct UTXO {
-  pub locker_script_id: ScriptID,
+  pub locker_script_hash: ScriptHash,
   pub value: Amount,
 }
 
@@ -63,7 +63,7 @@ binary_layout!(txo_id, BigEndian, {
 });
 
 binary_layout!(txo, BigEndian, {
-  locker_script_id: ScriptID,
+  locker_script_hash: [u8; 20],
   value: u64
 });
 

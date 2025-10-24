@@ -1,4 +1,4 @@
-use fjall::{PartitionCreateOptions};
+use fjall::PartitionCreateOptions;
 
 pub mod block;
 pub mod tx;

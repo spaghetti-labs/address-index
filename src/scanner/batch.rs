@@ -14,7 +14,15 @@ pub struct Batch {
 }
 
 impl Batch {
-  #[instrument(name = "Batch::build", level="trace", skip_all)]
+  #[instrument(name = "Batch::build", level="trace", skip_all, fields(
+    start_height = start_height,
+    num_blocks = tracing::field::Empty,
+    num_new_tx_states = tracing::field::Empty,
+    num_spent_txos = tracing::field::Empty,
+    num_intermediate_account_changes = tracing::field::Empty,
+    num_txs = tracing::field::Empty,
+    bytes_total_size = tracing::field::Empty,
+  ))]
   pub fn build(
     start_height: BlockHeight,
     blocks: &[bitcoin::Block],
@@ -38,6 +46,8 @@ impl Batch {
     tracing::Span::current().record("num_new_tx_states", batch.new_tx_states.len());
     tracing::Span::current().record("num_spent_txos", batch.spent_txos.len());
     tracing::Span::current().record("num_intermediate_account_changes", batch.intermediate_account_changes.len());
+    tracing::Span::current().record("num_txs", blocks.iter().map(|b| b.txdata.len()).sum::<usize>());
+    tracing::Span::current().record("bytes_total_size", blocks.iter().map(|b| b.total_size()).sum::<usize>());
 
     Ok(batch)
   }

@@ -1,33 +1,32 @@
 use std::hash::{Hash};
 
-use bitcoin::{OutPoint, ScriptHash};
+use bitcoin::{ScriptHash, Txid};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct CollidingOutPoint(OutPoint);
+pub struct CollidingTxid(Txid);
 
-impl Hash for CollidingOutPoint {
+impl Hash for CollidingTxid {
   fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
     state.write_u64(
-      u64::from_le_bytes(self.0.txid.as_raw_hash()[0..8].try_into().unwrap())
-      .wrapping_add(self.0.vout as u64),
+      u64::from_le_bytes(self.0.as_raw_hash()[0..8].try_into().unwrap()),
     );
   }
 }
 
-impl From<OutPoint> for CollidingOutPoint {
-  fn from(outpoint: OutPoint) -> Self {
-    Self(outpoint)
+impl From<Txid> for CollidingTxid {
+  fn from(txid: Txid) -> Self {
+    Self(txid)
   }
 }
 
-impl Into<OutPoint> for CollidingOutPoint {
-  fn into(self) -> OutPoint {
+impl Into<Txid> for CollidingTxid {
+  fn into(self) -> Txid {
     self.0
   }
 }
 
-impl AsRef<OutPoint> for CollidingOutPoint {
-  fn as_ref(&self) -> &OutPoint {
+impl AsRef<Txid> for CollidingTxid {
+  fn as_ref(&self) -> &Txid {
     &self.0
   }
 }
@@ -105,22 +104,18 @@ impl std::hash::BuildHasher for LazyHasherBuilder {
 mod tests {
   use std::iter;
   use bitcoin::hashes::Hash;
-  use bitcoin::{Txid};
   use rand::RngCore;
 
   #[test]
-  fn test_lazy_colliding_outpoint() {
-    use super::CollidingOutPoint;
-    use bitcoin::OutPoint;
+  fn test_lazy_colliding_txid() {
+    use super::CollidingTxid;
+    use bitcoin::Txid;
     use std::collections::HashSet;
 
     let test_data = iter::repeat_with(|| {
       let mut data = [0u8; 32];
       rand::rng().fill_bytes(&mut data);
-      OutPoint {
-        txid: Txid::from_byte_array(data),
-        vout: rand::rng().next_u32() % 100,
-      }
+      Txid::from_byte_array(data)
     }).take(10_000).collect::<Vec<_>>();
 
     // measure standard hash insert duration for all data
@@ -136,7 +131,7 @@ mod tests {
     let start = std::time::Instant::now();
     let mut lazy_colliding_set = HashSet::with_hasher(super::LazyHasherBuilder::new());
     for data in &test_data {
-      lazy_colliding_set.insert(CollidingOutPoint::from(data.clone()));
+      lazy_colliding_set.insert(CollidingTxid::from(data.clone()));
     }
     let lazy_colliding_duration = start.elapsed();
     println!("Lazy colliding hash insert duration: {:?}", lazy_colliding_duration);
@@ -154,7 +149,7 @@ mod tests {
     // measure lazy colliding hash lookup duration for all data
     let start = std::time::Instant::now();
     for data in &test_data {
-      assert!(lazy_colliding_set.contains(&CollidingOutPoint::from(data.clone())), "Lazy colliding set should contain the data");
+      assert!(lazy_colliding_set.contains(&CollidingTxid::from(data.clone())), "Lazy colliding set should contain the data");
     }
     let lazy_colliding_lookup_duration = start.elapsed();
     println!("Lazy colliding hash lookup duration: {:?}", lazy_colliding_lookup_duration);

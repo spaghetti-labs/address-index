@@ -1,10 +1,10 @@
 use std::{convert::Infallible, str::FromStr, sync::Arc};
-use bitcoin::{Amount, ScriptBuf, ScriptHash};
+use bitcoin::{Amount, ScriptBuf};
 use juniper::{graphql_object, EmptyMutation, EmptySubscription, RootNode};
 use rocket::{response::content::RawHtml, routes, State};
 use tokio::task::block_in_place;
 
-use crate::store::{account::AccountStoreRead, block::BlockStoreRead, BlockHeight, Store};
+use crate::store::{account::{AccountState, AccountStoreRead}, block::BlockStoreRead, BlockHeight, Store};
 
 pub async fn serve<'a>(store: Arc<Store>) -> anyhow::Result<Infallible> {
   _ = rocket::build()
@@ -49,7 +49,7 @@ impl<'r> Query<'r> {
     Ok(block_in_place(||self.store.get_tip_block())?.map_or(0, |(height, _)| height as i32))
   }
 
-  async fn locker_script(&self, hex: Option<String>, address: Option<String>) -> anyhow::Result<ScriptObject<'r>> {
+  async fn locker_script(&self, hex: Option<String>, address: Option<String>) -> anyhow::Result<ScriptObject> {
     let script_bytes = match (hex, address) {
       (Some(hex), None) => hex::decode(hex)?,
       (None, Some(address)) => {
@@ -60,35 +60,37 @@ impl<'r> Query<'r> {
     };
     let script = ScriptBuf::from_bytes(script_bytes.clone());
     let script_hash = script.script_hash();
-    Ok(ScriptObject { store: self.store, script_hash })
+    let account_state = block_in_place(|| self.store.get_account_state(&script_hash))?;
+    Ok(ScriptObject { account_state })
   }
 }
 
-struct ScriptObject<'r> {
-  store: &'r Store,
-  script_hash: ScriptHash,
+struct ScriptObject {
+  account_state: AccountState,
 }
 
 #[graphql_object(rename_all = "none")]
-impl<'r> ScriptObject<'r> {
+impl ScriptObject {
   async fn balance(&self, height: Option<String>) -> anyhow::Result<String> {
-    let balance = match height {
-      Some(height) => {
-        let height: BlockHeight = height.parse()?;
-        block_in_place(||self.store.get_historical_balance(&self.script_hash, height))?
-      }
-      None => {
-        block_in_place(||self.store.get_recent_balance(&self.script_hash))?
-      }
+    let balance = if let Some(height) = height {
+      let height = BlockHeight::from_str(&height)?;
+      self.account_state.balance_history.iter()
+        .filter(|(h, _)| **h <= height)
+        .map(|(_, amount)| amount)
+        .last()
+        .cloned()
+        .unwrap_or(Amount::ZERO)
+    } else {
+      self.account_state.recent_balance
     };
+
     Ok(balance.to_sat().to_string())
   }
 
   async fn balance_history(&self) -> anyhow::Result<Vec<HistoricalBalance>> {
-    let historical_balances = block_in_place(|| self.store.get_balance_history(&self.script_hash))?;
-    Ok(historical_balances.into_iter().map(|(height, amount)| HistoricalBalance {
-      height,
-      balance: amount,
+    Ok(self.account_state.balance_history.iter().map(|(height, amount)| HistoricalBalance {
+      height: *height,
+      balance: *amount,
     }).collect())
   }
 }

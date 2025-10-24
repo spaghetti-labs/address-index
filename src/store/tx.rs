@@ -1,9 +1,7 @@
-use std::collections::BTreeMap;
-
 use bincode::{de::Decoder, enc::Encoder, error::{DecodeError, EncodeError}, Decode, Encode};
 use bitcoin::{hashes::Hash, Amount, ScriptHash, Txid};
 
-use crate::store::{Batch, Store};
+use crate::{sorted_vec::{SortedEntry, SortedMap}, store::{Batch, Store}};
 
 #[derive(Clone)]
 pub struct TXO {
@@ -32,13 +30,13 @@ impl<Context> Decode<Context> for TXO {
 
 #[derive(Clone)]
 pub struct TxState {
-  pub unspent_outputs: BTreeMap<u32, TXO>,
+  pub unspent_outputs: SortedMap<u32, TXO>,
 }
 
 impl Encode for TxState {
   fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-    self.unspent_outputs.len().encode(encoder)?;
-    for (index, txo) in &self.unspent_outputs {
+    self.unspent_outputs.as_ref().len().encode(encoder)?;
+    for SortedEntry { key: index, value: txo } in self.unspent_outputs.as_ref() {
       index.encode(encoder)?;
       txo.encode(encoder)?;
     }
@@ -49,19 +47,20 @@ impl Encode for TxState {
 impl<Context> Decode<Context> for TxState {
   fn decode<D: Decoder<Context=Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
     let len = usize::decode(decoder)?;
-    let mut unspent_outputs = BTreeMap::new();
+    let mut unspent_outputs = Vec::with_capacity(len);
     for _ in 0..len {
       let index = u32::decode(decoder)?;
       let txo = TXO::decode(decoder)?;
-      unspent_outputs.insert(index, txo);
+      unspent_outputs.push(SortedEntry { key: index, value: txo });
     }
+    let unspent_outputs = SortedMap::ingest(unspent_outputs);
     Ok(Self { unspent_outputs })
   }
 }
 
 impl TxState {
   pub fn unspent(
-    unspent_outputs: BTreeMap<u32, TXO>,
+    unspent_outputs: SortedMap<u32, TXO>,
   ) -> Self {
     Self {
       unspent_outputs,

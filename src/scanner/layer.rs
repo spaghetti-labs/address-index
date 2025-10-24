@@ -95,7 +95,10 @@ impl<'a, 'b> Layer<'a, 'b> {
                 |_| anyhow::format_err!("Negative recent balance for script hash {:?}", script_hash.as_ref())
               )?
             };
-            account_state.balance_history.insert(height, account_state.recent_balance);
+            account_state.balance_history.append(
+              height,
+              account_state.recent_balance,
+            );
           }
 
           Ok((script_hash.into(), account_state))

@@ -4,7 +4,7 @@ use juniper::{graphql_object, EmptyMutation, EmptySubscription, RootNode};
 use rocket::{response::content::RawHtml, routes, State};
 use tokio::task::block_in_place;
 
-use crate::store::{account::{AccountState, AccountStoreRead}, block::BlockStoreRead, BlockHeight, Store};
+use crate::{sorted_vec::SortedEntry, store::{account::{AccountState, AccountStoreRead}, block::BlockStoreRead, BlockHeight, Store}};
 
 pub async fn serve<'a>(store: Arc<Store>) -> anyhow::Result<Infallible> {
   _ = rocket::build()
@@ -74,9 +74,9 @@ impl ScriptObject {
   async fn balance(&self, height: Option<String>) -> anyhow::Result<String> {
     let balance = if let Some(height) = height {
       let height = BlockHeight::from_str(&height)?;
-      self.account_state.balance_history.iter()
-        .filter(|(h, _)| **h <= height)
-        .map(|(_, amount)| amount)
+      self.account_state.balance_history.as_ref().iter()
+        .filter(|SortedEntry { key, .. }| *key <= height)
+        .map(|SortedEntry { value, .. }| value)
         .last()
         .cloned()
         .unwrap_or(Amount::ZERO)
@@ -88,7 +88,7 @@ impl ScriptObject {
   }
 
   async fn balance_history(&self) -> anyhow::Result<Vec<HistoricalBalance>> {
-    Ok(self.account_state.balance_history.iter().map(|(height, amount)| HistoricalBalance {
+    Ok(self.account_state.balance_history.as_ref().iter().map(|SortedEntry { key: height, value: amount }| HistoricalBalance {
       height: *height,
       balance: *amount,
     }).collect())

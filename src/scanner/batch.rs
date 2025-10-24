@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use tracing::instrument;
 
-use crate::{hash::{CollidingScriptHash, CollidingTxid, LazyHasherBuilder}, store::{tx::{TxState, TXO}, BlockHeight}};
+use crate::{hash::{CollidingScriptHash, CollidingTxid, LazyHasherBuilder}, sorted_vec::{SortedEntry, SortedMap}, store::{tx::{TxState, TXO}, BlockHeight}};
 
 pub struct Batch {
   pub(crate) start_height: BlockHeight,
@@ -90,16 +90,20 @@ impl Batch {
 
       let txid = tx.compute_txid();
 
-      let mut unspent_txos = BTreeMap::new();
+      let mut unspent_txos = Vec::with_capacity(tx.output.len());
       for (txo_index, txout) in tx.output.iter().enumerate() {
         *self.intermediate_account_changes.entry(
           txout.script_pubkey.script_hash().into(),
         ).or_insert_with(|| BTreeMap::new()).entry(height).or_insert(bitcoin::SignedAmount::ZERO) += txout.value.try_into()?;
-        unspent_txos.insert(txo_index as u32, TXO {
-          locker_script_hash: txout.script_pubkey.script_hash(),
-          value: txout.value,
+        unspent_txos.push(SortedEntry {
+          key: txo_index as u32,
+          value: TXO {
+            locker_script_hash: txout.script_pubkey.script_hash(),
+            value: txout.value,
+          },
         });
       }
+      let unspent_txos = SortedMap::ingest(unspent_txos);
 
       if self.new_tx_states.insert(txid.into(), TxState::unspent(unspent_txos)).is_some() {
         // This can be due to Coinbase transactions with the same output script and value before BIP-30

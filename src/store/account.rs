@@ -1,24 +1,24 @@
-use std::collections::BTreeMap;
-
 use bincode::{de::Decoder, enc::Encoder, error::{DecodeError, EncodeError}, Decode, Encode};
 use bitcoin::{hashes::{Hash}, Amount, ScriptHash};
 use fjall::Slice;
+
+use crate::sorted_vec::{SortedEntry, SortedMap};
 
 use super::{BlockHeight, Batch, Store};
 
 #[derive(Debug, Clone)]
 pub struct AccountState {
   pub recent_balance: Amount,
-  pub balance_history: BTreeMap<BlockHeight, Amount>,
+  pub balance_history: SortedMap<BlockHeight, Amount>,
 }
 
 impl Encode for AccountState {
   fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
     self.recent_balance.to_sat().encode(encoder)?;
-    self.balance_history.len().encode(encoder)?;
-    for (height, amount) in &self.balance_history {
+    self.balance_history.as_ref().len().encode(encoder)?;
+    for SortedEntry { key: height, value: balance } in self.balance_history.as_ref().iter() {
       height.encode(encoder)?;
-      amount.to_sat().encode(encoder)?;
+      balance.to_sat().encode(encoder)?;
     }
     Ok(())
   }
@@ -29,12 +29,16 @@ impl<Context> Decode<Context> for AccountState {
     let recent_balance = Amount::from_sat(u64::decode(decoder)?);
 
     let history_len = usize::decode(decoder)?;
-    let mut balance_history = BTreeMap::new();
+    let mut balance_history = Vec::with_capacity(history_len);
     for _ in 0..history_len {
       let height = BlockHeight::decode(decoder)?;
       let amount = Amount::from_sat(u64::decode(decoder)?);
-      balance_history.insert(height, amount);
+      balance_history.push(SortedEntry{
+        key: height,
+        value: amount,
+      });
     }
+    let balance_history = SortedMap::ingest(balance_history);
 
     Ok(Self {
       recent_balance,
@@ -47,7 +51,7 @@ impl AccountState {
   pub fn empty() -> Self {
     Self {
       recent_balance: Amount::ZERO,
-      balance_history: BTreeMap::new(),
+      balance_history: SortedMap::empty(),
     }
   }
 }

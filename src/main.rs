@@ -3,6 +3,7 @@ mod store;
 mod scanner;
 mod api;
 mod hash;
+mod sorted_vec;
 
 use std::{convert::Infallible, sync::Arc};
 use clap::Parser;

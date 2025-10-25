@@ -6,41 +6,44 @@ use std::{convert::Infallible, sync::Arc};
 use futures::{StreamExt, TryStreamExt as _, stream};
 use tokio::{sync::mpsc, task::{block_in_place, spawn_blocking}};
 
-use crate::{bitcoin_rest::BitcoinRestClient, scanner::{batch::Batch, fetch::Fetcher, layer::Layer}, store::{self, block::BlockStoreRead as _, Store}};
+use crate::{fetch::{BlockFetcher, HashFetcher, HeaderFetcher}, scanner::{batch::Batch, fetch::{prefetch_block_headers, stream_blocks}, layer::Layer}, store::{self, block::BlockStoreRead as _, Store}};
 
 
-pub struct Scanner {
-  bitcoin_client: BitcoinRestClient,
+pub struct Scanner<Fetcher> {
+  fetcher: Fetcher,
   store: Arc<Store>,
 }
 
-impl Scanner {
+impl<Fetcher> Scanner<Fetcher> {
   pub fn open(
-    bitcoin_client: BitcoinRestClient,
+    fetcher: Fetcher,
     store: Arc<Store>,
   ) -> anyhow::Result<Self> {
     Ok(Self {
-      bitcoin_client,
+      fetcher,
       store,
     })
   }
 
-  pub async fn scan_blocks(&self) -> anyhow::Result<Infallible> {
-    let concurrency = num_cpus::get();
+  pub async fn scan_blocks(&self) -> anyhow::Result<Infallible>
+  where
+    Fetcher: HeaderFetcher + BlockFetcher + HashFetcher + Clone + Send + 'static,
+  {
+    let header_batch_buffer_size = num_cpus::get();
+    let header_batch_size = 100;
+    let block_fetch_concurrency = 2;
+    let block_batch_size = 100;
+    let block_batch_concurrency = num_cpus::get();
 
     let start_height = block_in_place(||{
       self.store.get_tip_block()
     })?.map_or(0, |(height, _)| height + 1);
 
-    let start_hash = self.bitcoin_client.get_block_hash(start_height).await?;
+    let start_hash = self.fetcher.fetch_hash(start_height).await?;
 
-    let fetcher = Fetcher::new(self.bitcoin_client.clone());
+    let headers = prefetch_block_headers(self.fetcher.clone(), start_hash, header_batch_size, header_batch_buffer_size);
 
-    let headers = fetcher.prefetch_block_headers(start_hash, 100, concurrency);
-
-    let headers = headers.map_ok(|hs| stream::iter(hs.into_iter().map(Ok))).try_flatten();
-
-    let blocks = fetcher.stream_blocks(headers, 2);
+    let blocks = stream_blocks(self.fetcher.clone(), headers, block_fetch_concurrency);
 
     let blocks_heights = blocks
       .zip(stream::iter(start_height..))
@@ -49,9 +52,9 @@ impl Scanner {
         Ok::<_, anyhow::Error>((block, height))
       });
 
-    let block_chunks = blocks_heights.try_chunks(100);
+    let block_chunks = blocks_heights.try_chunks(block_batch_size);
     let block_chunks = {
-      let (sender, mut receiver) = mpsc::channel(concurrency);
+      let (sender, mut receiver) = mpsc::channel(block_batch_concurrency);
       tokio::spawn(async move {
         tokio::pin!(block_chunks);
 
@@ -64,20 +67,14 @@ impl Scanner {
       stream::poll_fn(move |cx| receiver.poll_recv(cx))
     };
 
-    let batches = block_chunks.map(|blocks_heights| tokio::task::spawn_blocking(move || {
-      let blocks_heights = blocks_heights?;
-      let start_height = blocks_heights.first().map(|(_, h)| *h).unwrap();
-      tracing::trace_span!("building_batch").in_scope(|| {
-        let blocks = {
-          let mut try_collect = Vec::new();
-          for (block, _) in blocks_heights {
-            try_collect.push(block()?);
-          }
-          try_collect
-        };
-        Batch::build(start_height, &blocks)
+    let batches = block_chunks.map(|blocks_heights| tokio::task::spawn_blocking(
+      move || tracing::trace_span!("building_batch").in_scope(|| {
+        let blocks_heights = blocks_heights?;
+        let start_height = blocks_heights.first().map(|(_, h)| *h).unwrap();
+        let blocks = blocks_heights.into_iter().map(|(block, _)| block).collect();
+        Batch::build(start_height, blocks)
       })
-    })).buffered(concurrency);
+    )).buffered(block_batch_concurrency);
 
     let store = self.store.clone();
 
@@ -110,8 +107,8 @@ impl Scanner {
   }
 }
 
-pub async fn scan(store: Arc<Store>, bitcoin_client: BitcoinRestClient) -> anyhow::Result<Infallible> {
-  let scanner = Scanner::open(bitcoin_client, store)?;
+pub async fn scan<Fetcher: HeaderFetcher + BlockFetcher + HashFetcher + Clone + Send + 'static>(store: Arc<Store>, fetcher: Fetcher) -> anyhow::Result<Infallible> {
+  let scanner = Scanner::open(fetcher, store)?;
   scanner.scan_blocks().await?;
 
   unreachable!();

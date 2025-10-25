@@ -2526,11 +2526,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "async-trait",
  "bigdecimal",
  "bincode",
  "bitcoin",
  "bitcoin_hashes 0.16.0",
  "byteorder",
+ "bytes",
  "clap",
  "fjall",
  "futures",

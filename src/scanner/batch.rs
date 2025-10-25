@@ -25,7 +25,7 @@ impl Batch {
   ))]
   pub fn build(
     start_height: BlockHeight,
-    blocks: &[bitcoin::Block],
+    blocks: Vec<bitcoin::Block>,
   ) -> anyhow::Result<Self> {
     let mut batch = Batch {
       start_height,

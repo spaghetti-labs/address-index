@@ -1,6 +1,10 @@
 use std::iter;
 
+use async_trait::async_trait;
 use bitcoin::{consensus, BlockHash};
+use bytes::Bytes;
+
+use crate::fetch::{BlockFetcher, HashFetcher, HeaderFetcher};
 
 #[derive(Clone)]
 pub struct BitcoinRestClient {
@@ -19,8 +23,16 @@ impl BitcoinRestClient {
       url,
     }
   }
+}
 
-  pub async fn get_block(&self, block_hash: &BlockHash) -> anyhow::Result<impl FnOnce() -> anyhow::Result<bitcoin::Block>> {
+#[async_trait]
+impl BlockFetcher for BitcoinRestClient {
+  type FetchedBlock = BlockBytes;
+
+  async fn fetch_block(
+      &self,
+      block_hash: &BlockHash,
+    ) -> anyhow::Result<BlockBytes> {
     let binary = self.client.get(format!("{}/rest/block/{}.bin", &self.url, block_hash))
       .send()
       .await?
@@ -28,12 +40,25 @@ impl BitcoinRestClient {
       .bytes()
       .await?;
 
-    Ok(move || consensus::deserialize(&binary).map_err(
-      |e| anyhow::anyhow!("Failed to deserialize block: {}", e)
-    ))
+    Ok(BlockBytes(binary))
   }
+}
 
-  pub async fn get_headers<'a>(&'a self, from_block_hash: &'a BlockHash, count: usize) -> anyhow::Result<impl Iterator<Item = anyhow::Result<bitcoin::block::Header>>> {
+pub struct BlockBytes(pub Bytes);
+
+impl TryInto<bitcoin::Block> for BlockBytes {
+  type Error = anyhow::Error;
+
+  fn try_into(self) -> Result<bitcoin::Block, Self::Error> {
+    Ok(consensus::deserialize(&self.0).map_err(
+      |e| anyhow::anyhow!("Failed to deserialize block: {}", e)
+    )?)
+  }
+}
+
+#[async_trait]
+impl HeaderFetcher for BitcoinRestClient {
+  async fn fetch_headers(&self, from_block_hash: &BlockHash, count: usize) -> anyhow::Result<Box<dyn Send + Iterator<Item = anyhow::Result<bitcoin::block::Header>>>> {
     let mut binary = self.client.get(format!("{}/rest/headers/{}.bin?count={}", &self.url, from_block_hash, count))
       .send()
       .await?
@@ -41,7 +66,7 @@ impl BitcoinRestClient {
       .bytes()
       .await?;
 
-    Ok(iter::from_fn(move || {
+    Ok(Box::new(iter::from_fn(move || {
       if binary.is_empty() {
         return None;
       }
@@ -56,10 +81,13 @@ impl BitcoinRestClient {
       binary = binary.slice(size..);
 
       Some(Ok(header))
-    }))
+    })))
   }
+}
 
-  pub async fn get_block_hash(&self, height: u32) -> anyhow::Result<bitcoin::BlockHash> {
+#[async_trait]
+impl HashFetcher for BitcoinRestClient {
+  async fn fetch_hash(&self, height: u32) -> anyhow::Result<BlockHash> {
     let binary = self.client.get(format!("{}/rest/blockhashbyheight/{}.bin", &self.url, height))
       .send()
       .await?

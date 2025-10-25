@@ -1,9 +1,9 @@
-mod bitcoin_rest;
 mod store;
 mod scanner;
 mod api;
 mod hash;
 mod sorted_vec;
+mod fetch;
 
 use std::{convert::Infallible, sync::Arc};
 use clap::Parser;
@@ -12,13 +12,16 @@ use tokio::select;
 use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
 use opentelemetry::trace::TracerProvider as _;
 
-use crate::{api::serve, bitcoin_rest::BitcoinRestClient, scanner::scan, store::Store};
+use crate::{api::serve, fetch::{blocks_dir::BlocksDirReader, combined::CombinedFetcher, rest_api::BitcoinRestClient}, scanner::scan, store::Store};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
   #[arg(long = "rest-url", env = "REST_URL")]
   rest_url: String,
+
+  #[arg(long = "blocks-dir", env = "BLOCKS_DIR")]
+  blocks_dir: Option<String>,
 
   #[arg(long = "data-dir", env = "DATA_DIR")]
   data_dir: String,
@@ -28,7 +31,15 @@ struct Args {
 async fn main() -> anyhow::Result<Infallible> {
   let args = Args::try_parse()?;
 
-  let bitcoin_client = BitcoinRestClient::new(args.rest_url);
+  let rest_client = BitcoinRestClient::new(args.rest_url);
+
+  let blocks_dir = if let Some(blocks_dir) = args.blocks_dir {
+    Some(BlocksDirReader::try_open(blocks_dir)?)
+  } else {
+    None
+  };
+
+  let fetcher = Arc::new(CombinedFetcher::new(rest_client, blocks_dir));
 
   let store = Arc::new(Store::open(&args.data_dir)?);
 
@@ -50,7 +61,7 @@ async fn main() -> anyhow::Result<Infallible> {
     .init();
 
   select! {
-    res = scan(store.clone(), bitcoin_client) => res,
+    res = scan(store.clone(), fetcher) => res,
     res = serve(store.clone()) => res,
   }?;
 

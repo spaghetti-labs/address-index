@@ -3,6 +3,7 @@ use rocksdb::WaitForCompactOptions;
 
 pub mod block;
 pub mod txo;
+pub mod remote;
 
 pub type BlockHeight = u32;
 

@@ -1,23 +1,22 @@
-use bincode::{config::{BigEndian, Configuration, Fixint, Varint}, de::Decoder, enc::Encoder, error::{AllowedEnumVariants, DecodeError, EncodeError}, Decode, Encode};
-use bitcoin::{hashes::Hash, Amount, OutPoint, ScriptHash, Txid};
+use bitcoin::{hashes::Hash, Amount, OutPoint, ScriptHash};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rocksdb::SliceTransform;
+use scroll::{pwrite_vec_with, Pread, Pwrite, SizeWith, BE};
+use scroll_derive::ActualSizeWith;
 
-use crate::{iter_util::IterExt, store::{Batch, BlockHeight, Store}};
-
-const BIN_KEY: Configuration<BigEndian, Fixint> = bincode::config::standard().with_big_endian().with_fixed_int_encoding();
-const BIN_VALUE: Configuration<BigEndian, Varint> = bincode::config::standard().with_big_endian().with_variable_int_encoding();
+use crate::{iter_util::IterExt, store::{remote::{AmountWrapper, OptionWrapper, OutPointWrapper, ScriptHashWrapper}, Batch, BlockHeight, Store}};
 
 pub fn cf_descriptors(common_opts: &rocksdb::Options) -> Vec<rocksdb::ColumnFamilyDescriptor> {
   let mut outpoint_to_txo_opts = common_opts.clone();
   outpoint_to_txo_opts.set_merge_operator("txo_merge", |key, existing, operands| {
-    let mut state: Option<TXOState> = existing.map(|v| bincode::decode_from_slice(v.as_ref(), BIN_VALUE).unwrap().0);
+    // let mut state: Option<TXOState> = existing.map(|v| bincode::decode_from_slice(v.as_ref(), BIN_VALUE).unwrap().0);
+    let mut state: Option<TXOState> = existing.map(|v| v.pread_with(0, BE).unwrap());
     for op in operands {
-      let update: TXOUpdate = bincode::decode_from_slice(op.as_ref(), BIN_VALUE).unwrap().0;
+      let update: TXOUpdate = op.pread_with(0, BE).unwrap();
       match update {
         TXOUpdate::Generated(g) => {
           if let Some(ref state) = state {
-            let TXOKey { outpoint } = bincode::decode_from_slice( key, BIN_KEY).unwrap().0;
+            let outpoint: OutPoint = (&key.pread_with::<OutPointWrapper>(0, BE).unwrap()).into();
             if outpoint.vout != 0 {
               panic!("TXOGenerated update for existing TXOState at non-coinbase outpoint {}", outpoint);
             } if state.generated_height >= g.generated_height {
@@ -43,7 +42,7 @@ pub fn cf_descriptors(common_opts: &rocksdb::Options) -> Vec<rocksdb::ColumnFami
       }
     }
     let state = state.expect("no operands in TXO merge");
-    Some(bincode::encode_to_vec(&state, BIN_VALUE).unwrap())
+    Some(pwrite_vec_with(&state, BE).unwrap())
   }, |_key, _existing, _operands| None);
 
   let mut locker_script_hash_and_outpoint_opts = common_opts.clone();
@@ -68,117 +67,25 @@ pub fn cf_descriptors(common_opts: &rocksdb::Options) -> Vec<rocksdb::ColumnFami
   ]
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Pwrite, Pread, SizeWith)]
 pub struct TXOGenerated {
+  #[scroll(with = ScriptHashWrapper)]
   pub locker_script_hash: ScriptHash,
+  #[scroll(with = AmountWrapper)]
   pub value: Amount,
   pub generated_height: BlockHeight,
 }
 
-impl Encode for TXOGenerated {
-  fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-    self.locker_script_hash.to_byte_array().encode(encoder)?;
-    self.value.to_sat().encode(encoder)?;
-    self.generated_height.encode(encoder)?;
-    Ok(())
-  }
-}
-
-impl<Context> Decode<Context> for TXOGenerated {
-  fn decode<D: Decoder<Context=Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-    Ok(Self {
-      locker_script_hash: ScriptHash::from_byte_array(
-      <[u8; _]>::decode(decoder)?,
-    ),
-      value: Amount::from_sat(u64::decode(decoder)?),
-      generated_height: BlockHeight::decode(decoder)?,
-    })
-  }
-}
-
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Pwrite, Pread, SizeWith)]
 pub struct TXOSpent {
   pub spent_height: BlockHeight,
 }
 
-impl Encode for TXOSpent {
-  fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-    self.spent_height.encode(encoder)?;
-    Ok(())
-  }
-}
-
-impl<Context> Decode<Context> for TXOSpent {
-  fn decode<D: Decoder<Context=Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-    Ok(Self {
-      spent_height: BlockHeight::decode(decoder)?,
-    })
-  }
-}
-
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Pwrite, Pread, ActualSizeWith)]
 #[repr(u8)]
 pub enum TXOUpdate {
-  Generated(TXOGenerated),
-  Spent(TXOSpent),
-}
-
-impl Encode for TXOUpdate {
-  fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-    match self {
-      TXOUpdate::Generated(g) => {
-        1u8.encode(encoder)?;
-        g.encode(encoder)?;
-      }
-      TXOUpdate::Spent(s) => {
-        2u8.encode(encoder)?;
-        s.encode(encoder)?;
-      }
-    }
-    Ok(())
-  }
-}
-
-impl<Context> Decode<Context> for TXOUpdate {
-  fn decode<D: Decoder<Context=Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-    let tag = u8::decode(decoder)?;
-    match tag {
-      1 => Ok(TXOUpdate::Generated(TXOGenerated::decode(decoder)?)),
-      2 => Ok(TXOUpdate::Spent(TXOSpent::decode(decoder)?)),
-      _ => Err(DecodeError::UnexpectedVariant { type_name: "TXOUpdate", allowed: &AllowedEnumVariants::Range { min: 1, max: 2 }, found: tag as u32 }),
-    }
-  }
-}
-
-#[derive(Copy, Clone)]
-pub struct TXOState {
-  pub locker_script_hash: ScriptHash,
-  pub value: Amount,
-  pub generated_height: BlockHeight,
-  pub spent_height: Option<BlockHeight>,
-}
-
-impl Encode for TXOState {
-  fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-    self.locker_script_hash.to_byte_array().encode(encoder)?;
-    self.value.to_sat().encode(encoder)?;
-    self.generated_height.encode(encoder)?;
-    self.spent_height.encode(encoder)?;
-    Ok(())
-  }
-}
-
-impl<Context> Decode<Context> for TXOState {
-  fn decode<D: Decoder<Context=Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-    Ok(Self {
-      locker_script_hash: ScriptHash::from_byte_array(
-      <[u8; _]>::decode(decoder)?,
-    ),
-      value: Amount::from_sat(u64::decode(decoder)?),
-      generated_height: BlockHeight::decode(decoder)?,
-      spent_height: Option::<BlockHeight>::decode(decoder)?,
-    })
-  }
+  Generated(TXOGenerated) = 1,
+  Spent(TXOSpent) = 2,
 }
 
 pub trait TXOStoreRead {
@@ -207,7 +114,7 @@ impl TXOStoreRead for Store {
 
     let keys = outpoints
       .into_iter()
-      .map(|h| bincode::encode_to_vec(TXOKey { outpoint: *h }, BIN_KEY).unwrap())
+      .map(|h| pwrite_vec_with(OutPointWrapper::from(h), BE).unwrap())
       .collect::<Vec<_>>();
 
     if !keys.is_sorted() {
@@ -221,7 +128,7 @@ impl TXOStoreRead for Store {
           let Some(value) = res? else {
             return Ok(None);
           };
-          Ok(Some(bincode::decode_from_slice(value.as_ref(), BIN_VALUE)?.0))
+          Ok(Some(value.as_ref().pread_with(0, BE)?))
         })
     )
   }
@@ -235,9 +142,9 @@ impl TXOStoreRead for Store {
 
     let iter = self.db.prefix_iterator_cf(&cf, prefix);
     Ok(
-      iter.map(|res| -> anyhow::Result<LockerScriptHashAndOutpointKey> {
+      iter.map(|res| -> anyhow::Result<LockerScriptHashAndOutpoint> {
         let (key, _value) = res?;
-        Ok(bincode::decode_from_slice(key.as_ref(), BIN_KEY)?.0)
+        Ok(key.as_ref().pread_with(0, BE)?)
       })
       .take_while({
         let locker_script_hash = locker_script_hash.clone();
@@ -253,107 +160,6 @@ impl TXOStoreRead for Store {
   }
 }
 
-pub struct TXOKey {
-  pub outpoint: OutPoint,
-}
-
-impl Encode for TXOKey {
-  fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-    self.outpoint.txid.as_byte_array().encode(encoder)?;
-    self.outpoint.vout.encode(encoder)?;
-    Ok(())
-  }
-}
-
-impl<Context> Decode<Context> for TXOKey {
-  fn decode<D: Decoder<Context=Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-    Ok(Self {
-      outpoint: OutPoint {
-        txid: Txid::from_byte_array(<[u8; _]>::decode(decoder)?),
-        vout: u32::decode(decoder)?,
-      },
-    })
-  }
-}
-
-pub struct LockerScriptHashAndOutpointKey {
-  pub locker_script_hash: ScriptHash,
-  pub outpoint: OutPoint,
-}
-
-impl Encode for LockerScriptHashAndOutpointKey {
-  fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-    self.locker_script_hash.to_byte_array().encode(encoder)?;
-    self.outpoint.txid.as_byte_array().encode(encoder)?;
-    self.outpoint.vout.encode(encoder)?;
-    Ok(())
-  }
-}
-
-impl<Context> Decode<Context> for LockerScriptHashAndOutpointKey {
-  fn decode<D: Decoder<Context=Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-    Ok(Self {
-      locker_script_hash: ScriptHash::from_byte_array(<[u8; _]>::decode(decoder)?),
-      outpoint: OutPoint {
-        txid: Txid::from_byte_array(<[u8; _]>::decode(decoder)?),
-        vout: u32::decode(decoder)?,
-      },
-    })
-  }
-}
-
-pub struct GeneratedHeightAndOutpointKey {
-  pub generated_height: BlockHeight,
-  pub outpoint: OutPoint,
-}
-
-impl Encode for GeneratedHeightAndOutpointKey {
-  fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-    self.generated_height.encode(encoder)?;
-    self.outpoint.txid.as_byte_array().encode(encoder)?;
-    self.outpoint.vout.encode(encoder)?;
-    Ok(())
-  }
-}
-
-impl<Context> Decode<Context> for GeneratedHeightAndOutpointKey {
-  fn decode<D: Decoder<Context=Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-    Ok(Self {
-      generated_height: BlockHeight::decode(decoder)?,
-      outpoint: OutPoint {
-        txid: Txid::from_byte_array(<[u8; _]>::decode(decoder)?),
-        vout: u32::decode(decoder)?,
-      },
-    })
-  }
-}
-
-pub struct SpentHeightAndOutpointKey {
-  pub spent_height: BlockHeight,
-  pub outpoint: OutPoint,
-}
-
-impl Encode for SpentHeightAndOutpointKey {
-  fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-    self.spent_height.encode(encoder)?;
-    self.outpoint.txid.as_byte_array().encode(encoder)?;
-    self.outpoint.vout.encode(encoder)?;
-    Ok(())
-  }
-}
-
-impl<Context> Decode<Context> for SpentHeightAndOutpointKey {
-  fn decode<D: Decoder<Context=Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-    Ok(Self {
-      spent_height: BlockHeight::decode(decoder)?,
-      outpoint: OutPoint {
-        txid: Txid::from_byte_array(<[u8; _]>::decode(decoder)?),
-        vout: u32::decode(decoder)?,
-      },
-    })
-  }
-}
-
 impl TXOStoreWrite for Batch<'_> {
   fn generated_txos<'data>(&mut self, entries: impl IntoParallelIterator<Item = (&'data OutPoint, &'data TXOGenerated)>) {
     let cf_outpoint_to_txo_state = self.store.db.cf_handle("outpoint_to_txo_state").unwrap();
@@ -363,16 +169,16 @@ impl TXOStoreWrite for Batch<'_> {
     let entries = entries
       .into_par_iter()
       .map(|(outpoint, generated)| {
-        let key_outpoint_to_txo_state = bincode::encode_to_vec(TXOKey { outpoint: *outpoint }, BIN_KEY).unwrap();
-        let value = bincode::encode_to_vec(&TXOUpdate::Generated(generated.clone()), BIN_VALUE).unwrap();
-        let key_locker_script_hash_and_outpoint = bincode::encode_to_vec(LockerScriptHashAndOutpointKey {
+        let key_outpoint_to_txo_state = pwrite_vec_with(OutPointWrapper::from(outpoint), BE).unwrap();
+        let value = pwrite_vec_with(TXOUpdate::Generated(generated.clone()), BE).unwrap();
+        let key_locker_script_hash_and_outpoint = pwrite_vec_with(LockerScriptHashAndOutpoint {
           locker_script_hash: generated.locker_script_hash,
           outpoint: *outpoint,
-        }, BIN_KEY).unwrap();
-        let key_generated_height_and_outpoint = bincode::encode_to_vec(GeneratedHeightAndOutpointKey {
+        }, BE).unwrap();
+        let key_generated_height_and_outpoint = pwrite_vec_with(GeneratedHeightAndOutPoint {
           generated_height: generated.generated_height,
           outpoint: *outpoint,
-        }, BIN_KEY).unwrap();
+        }, BE).unwrap();
         (key_outpoint_to_txo_state, value, key_locker_script_hash_and_outpoint, key_generated_height_and_outpoint)
       })
       .collect_vec_list()
@@ -392,12 +198,12 @@ impl TXOStoreWrite for Batch<'_> {
     let entries = entries
       .into_par_iter()
       .map(|(outpoint, spent)| {
-        let key_outpoint_to_txo_state = bincode::encode_to_vec(TXOKey { outpoint: *outpoint }, BIN_KEY).unwrap();
-        let value = bincode::encode_to_vec(&TXOUpdate::Spent(spent.clone()), BIN_VALUE).unwrap();
-        let key_spent_height_and_outpoint = bincode::encode_to_vec(SpentHeightAndOutpointKey {
+        let key_outpoint_to_txo_state = pwrite_vec_with(OutPointWrapper::from(outpoint), BE).unwrap();
+        let value = pwrite_vec_with(TXOUpdate::Spent(spent.clone()), BE).unwrap();
+        let key_spent_height_and_outpoint = pwrite_vec_with(SpentHeightAndOutPoint {
           spent_height: spent.spent_height,
           outpoint: *outpoint,
-        }, BIN_KEY).unwrap();
+        }, BE).unwrap();
         (key_outpoint_to_txo_state, value, key_spent_height_and_outpoint)
       })
       .collect_vec_list()
@@ -409,4 +215,37 @@ impl TXOStoreWrite for Batch<'_> {
       self.batch.put_cf(&cf_spent_height_and_outpoint, key_spent_height_and_outpoint, &[]);
     }
   }
+}
+
+#[derive(Clone, Copy, Pread, Pwrite, ActualSizeWith)]
+pub struct TXOState {
+  #[scroll(with = ScriptHashWrapper)]
+  pub locker_script_hash: ScriptHash,
+  #[scroll(with = AmountWrapper)]
+  pub value: Amount,
+  pub generated_height: BlockHeight,
+  #[scroll(with = OptionWrapper<_>)]
+  pub spent_height: Option<BlockHeight>,
+}
+
+#[derive(Pread, Pwrite, SizeWith)]
+pub struct SpentHeightAndOutPoint {
+  pub spent_height: BlockHeight,
+  #[scroll(with = OutPointWrapper)]
+  pub outpoint: OutPoint,
+}
+
+#[derive(Pread, Pwrite, SizeWith)]
+pub struct GeneratedHeightAndOutPoint {
+  pub generated_height: BlockHeight,
+  #[scroll(with = OutPointWrapper)]
+  pub outpoint: OutPoint,
+}
+
+#[derive(Pread, Pwrite, SizeWith)]
+pub struct LockerScriptHashAndOutpoint {
+  #[scroll(with = ScriptHashWrapper)]
+  pub locker_script_hash: ScriptHash,
+  #[scroll(with = OutPointWrapper)]
+  pub outpoint: OutPoint,
 }

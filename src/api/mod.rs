@@ -87,7 +87,7 @@ impl<'r> ScriptObject<'r> {
     ).collect::<anyhow::Result<Vec<_>>>()?;
     txos.sort_by_key(|txo|txo.generated_height);
 
-    let mut spent_txos = txos.iter().filter(|txo|txo.spent_height.is_some()).cloned().collect::<Vec<_>>();
+    let mut spent_txos = txos.iter().filter(|txo|txo.spent_height.is_some()).copied().collect::<Vec<_>>();
     spent_txos.sort_by_key(|txo|txo.spent_height.unwrap());
 
     let mut txos = txos.into_iter().peekable();

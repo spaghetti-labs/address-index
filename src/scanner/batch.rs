@@ -1,25 +1,24 @@
-use std::collections::{BTreeMap, HashMap};
+use bitcoin::OutPoint;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator as _};
 use tracing::instrument;
 
-use crate::{hash::{CollidingScriptHash, CollidingTxid, LazyHasherBuilder}, sorted_vec::{SortedEntry, SortedMap}, store::{tx::{TxState, TXO}, BlockHeight}};
+use crate::store::{self, block::{BlockStoreRead as _, BlockStoreWrite as _}, txo::{TXOGenerated, TXOSpent, TXOStoreWrite}, BlockHeight};
 
 pub struct Batch {
   pub(crate) start_height: BlockHeight,
   pub(crate) end_height: BlockHeight,
   pub(crate) blocks: Vec<bitcoin::BlockHash>,
 
-  pub(crate) new_tx_states: HashMap<CollidingTxid, TxState, LazyHasherBuilder>,
-  pub(crate) spent_txos: HashMap<CollidingTxid, BTreeMap<u32, BlockHeight>, LazyHasherBuilder>,
-  pub(crate) intermediate_account_changes: HashMap<CollidingScriptHash, BTreeMap<BlockHeight, bitcoin::SignedAmount>, LazyHasherBuilder>,
+  pub(crate) generated_txos: Vec<(OutPoint, TXOGenerated)>,
+  pub(crate) spent_txos: Vec<(OutPoint, TXOSpent)>,
 }
 
 impl Batch {
   #[instrument(name = "Batch::build", level="trace", skip_all, fields(
     start_height = start_height,
     num_blocks = tracing::field::Empty,
-    num_new_tx_states = tracing::field::Empty,
+    num_generated_txos = tracing::field::Empty,
     num_spent_txos = tracing::field::Empty,
-    num_intermediate_account_changes = tracing::field::Empty,
     num_txs = tracing::field::Empty,
     bytes_total_size = tracing::field::Empty,
   ))]
@@ -31,21 +30,17 @@ impl Batch {
       start_height,
       end_height: start_height + blocks.len() as BlockHeight,
       blocks: Vec::with_capacity(blocks.len()),
-      new_tx_states: HashMap::with_hasher(LazyHasherBuilder::new()),
-      intermediate_account_changes: HashMap::with_hasher(LazyHasherBuilder::new()),
-      spent_txos: HashMap::with_hasher(LazyHasherBuilder::new()),
+      generated_txos: Vec::new(),
+      spent_txos: Vec::new(),
     };
     for (i, block) in blocks.iter().enumerate() {
       let height = start_height + i as BlockHeight;
       batch.scan_block(height, block)?;
     }
 
-    batch.new_tx_states.retain(|_, tx_state| !tx_state.is_empty());
-
     tracing::Span::current().record("num_blocks", batch.blocks.len());
-    tracing::Span::current().record("num_new_tx_states", batch.new_tx_states.len());
+    tracing::Span::current().record("num_generated_txos", batch.generated_txos.len());
     tracing::Span::current().record("num_spent_txos", batch.spent_txos.len());
-    tracing::Span::current().record("num_intermediate_account_changes", batch.intermediate_account_changes.len());
     tracing::Span::current().record("num_txs", blocks.iter().map(|b| b.txdata.len()).sum::<usize>());
     tracing::Span::current().record("bytes_total_size", blocks.iter().map(|b| b.total_size()).sum::<usize>());
 
@@ -73,43 +68,58 @@ impl Batch {
           continue;
         }
 
-        let utxo = self.new_tx_states
-          .get_mut(&txin.previous_output.txid.into())
-          .and_then(|m| m.unspent_outputs.remove(&txin.previous_output.vout));
-
-        if let Some(utxo) = utxo {
-          *self.intermediate_account_changes.entry(
-            utxo.locker_script_hash.into(),
-          ).or_insert_with(|| BTreeMap::new()).entry(height).or_insert(bitcoin::SignedAmount::ZERO) -= utxo.value.try_into()?;
-        } else {
-          self.spent_txos.entry(txin.previous_output.txid.into())
-            .or_insert_with(|| BTreeMap::new())
-            .insert(txin.previous_output.vout, height);
-        }
+        self.spent_txos.push((txin.previous_output, TXOSpent { spent_height: height }));
       }
 
       let txid = tx.compute_txid();
 
-      let mut unspent_txos = Vec::with_capacity(tx.output.len());
-      for (txo_index, txout) in tx.output.iter().enumerate() {
-        *self.intermediate_account_changes.entry(
-          txout.script_pubkey.script_hash().into(),
-        ).or_insert_with(|| BTreeMap::new()).entry(height).or_insert(bitcoin::SignedAmount::ZERO) += txout.value.try_into()?;
-        unspent_txos.push(SortedEntry {
-          key: txo_index as u32,
-          value: TXO {
-            locker_script_hash: txout.script_pubkey.script_hash(),
-            value: txout.value,
-          },
-        });
-      }
-      let unspent_txos = SortedMap::ingest(unspent_txos);
+      for (index, txout) in tx.output.iter().enumerate() {
+        let outpoint = OutPoint {
+          txid,
+          vout: index as u32,
+        };
+        let locker_script_hash = txout.script_pubkey.script_hash();
 
-      if self.new_tx_states.insert(txid.into(), TxState::unspent(unspent_txos)).is_some() {
-        // This can be due to Coinbase transactions with the same output script and value before BIP-30
-        tracing::warn!("Duplicate TXID detected in block at height {}: {}", height, txid);
+        self.generated_txos.push((
+          outpoint,
+          TXOGenerated {
+            locker_script_hash,
+            value: txout.value,
+            generated_height: height,
+          },
+        ));
       }
     }
+    Ok(())
+  }
+
+  pub fn write(self, store: &mut store::Batch) -> anyhow::Result<()> {
+    match store.store.get_tip_block()? {
+      Some((tip_height, _)) if tip_height + 1 != self.start_height => {
+        anyhow::bail!(
+          "Batch start height {} does not follow store tip height {}",
+          self.start_height,
+          tip_height,
+        );
+      }
+      None if self.start_height != 0 => {
+        anyhow::bail!(
+          "Batch start height {} is invalid for empty store",
+          self.start_height,
+        );
+      }
+      _ => {}
+    }
+
+    store.insert_blocks(self.blocks.iter().enumerate().map(|(i, block_hash)| {
+      let block_height = self.start_height + i as BlockHeight;
+      (block_hash, block_height)
+    }));
+
+    store.generated_txos(self.generated_txos.par_iter().map(|(outpoint, txo)| (outpoint, txo)));
+
+    store.spent_txos(self.spent_txos.par_iter().map(|(outpoint, txo)| (outpoint, txo)));
+
     Ok(())
   }
 }

@@ -1,9 +1,8 @@
 mod store;
 mod scanner;
 mod api;
-mod hash;
-mod sorted_vec;
 mod fetch;
+mod iter_util;
 
 use std::{convert::Infallible, sync::Arc};
 use clap::Parser;

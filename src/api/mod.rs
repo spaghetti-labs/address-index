@@ -1,10 +1,10 @@
-use std::{convert::Infallible, str::FromStr, sync::Arc};
-use bitcoin::{Amount, ScriptBuf};
+use std::{convert::Infallible, iter, str::FromStr, sync::Arc};
+use bitcoin::{Amount, ScriptBuf, ScriptHash};
 use juniper::{graphql_object, EmptyMutation, EmptySubscription, RootNode};
 use rocket::{response::content::RawHtml, routes, State};
 use tokio::task::block_in_place;
 
-use crate::{sorted_vec::SortedEntry, store::{account::{AccountState, AccountStoreRead}, block::BlockStoreRead, BlockHeight, Store}};
+use crate::store::{block::BlockStoreRead, txo::{TXOState, TXOStoreRead}, BlockHeight, Store};
 
 pub async fn serve<'a>(store: Arc<Store>) -> anyhow::Result<Infallible> {
   _ = rocket::build()
@@ -60,37 +60,125 @@ impl<'r> Query<'r> {
     };
     let script = ScriptBuf::from_bytes(script_bytes.clone());
     let script_hash = script.script_hash();
-    let account_state = block_in_place(|| self.store.get_account_state(&script_hash))?;
-    Ok(ScriptObject { account_state })
+    Ok(ScriptObject { store: self.store, script_hash })
   }
 }
 
-struct ScriptObject {
-  account_state: AccountState,
+struct ScriptObject<'r> {
+  store: &'r Store,
+  script_hash: ScriptHash,
+}
+
+impl<'r> ScriptObject<'r> {
+  fn iterate_balance_history(&self) -> anyhow::Result<impl Iterator<Item = (BlockHeight, Amount)> + 'r> {
+    let txo_outpoints = block_in_place(||{
+      self.store.get_locker_script_txos(&self.script_hash)
+    })?.collect::<anyhow::Result<Vec<_>>>()?;
+
+    let mut txos = block_in_place(||{
+      self.store.get_txos(txo_outpoints.iter())
+    })?.map(
+      |txo| {
+        let Some(txo) = txo? else {
+          anyhow::bail!("missing txo");
+        };
+        Ok(txo)
+      }
+    ).collect::<anyhow::Result<Vec<_>>>()?;
+    txos.sort_by_key(|txo|txo.generated_height);
+
+    let mut spent_txos = txos.iter().filter(|txo|txo.spent_height.is_some()).cloned().collect::<Vec<_>>();
+    spent_txos.sort_by_key(|txo|txo.spent_height.unwrap());
+
+    let mut txos = txos.into_iter().peekable();
+    let mut spent_txos = spent_txos.into_iter().peekable();
+
+    let mut balance = Amount::ZERO;
+    Ok(iter::from_fn(move || {
+      let next_generated_height = txos.peek().map(|txo|txo.generated_height);
+      let next_spent_height = spent_txos.peek().map(|txo|txo.spent_height.unwrap());
+      let next_height = match (next_generated_height, next_spent_height) {
+        (Some(generated_height), Some(spent_height)) => Some(generated_height.min(spent_height)),
+        (Some(generated_height), None) => Some(generated_height),
+        (None, Some(spent_height)) => Some(spent_height),
+        (None, None) => {
+          return None;
+        },
+      }?;
+
+      let prev_balance = balance;
+
+      while let Some(txo) = txos.peek() {
+        if txo.generated_height != next_height {
+          break;
+        }
+        let txo = txos.next().unwrap();
+        balance += txo.value;
+      }
+      while let Some(txo) = spent_txos.peek() {
+        if txo.spent_height.unwrap() != next_height {
+          break;
+        }
+        let txo = spent_txos.next().unwrap();
+        balance -= txo.value;
+      }
+
+      if balance == prev_balance {
+        return None;
+      }
+
+      Some((next_height, balance))
+    }))
+  }
+
+  fn gen_unspent_txos(&self) -> anyhow::Result<impl Iterator<Item = TXOState> + 'r> {
+    let txo_outpoints = block_in_place(||{
+      self.store.get_locker_script_txos(&self.script_hash)
+    })?.collect::<anyhow::Result<Vec<_>>>()?;
+    let unspent_txos = block_in_place(||{
+      self.store.get_txos(txo_outpoints.iter())
+    })?.map(|txo| {
+      let Some(txo) = txo? else {
+        anyhow::bail!("missing txo");
+      };
+      Ok(txo)
+    }).filter(|txo|{
+      match txo {
+        Ok(txo) => txo.spent_height.is_none(),
+        _ => true,
+      }
+    }).collect::<anyhow::Result<Vec<_>>>()?.into_iter();
+    Ok(unspent_txos)
+  }
+
+  fn recent_balance(&self) -> anyhow::Result<Amount> {
+    let unspent_txos = self.gen_unspent_txos()?;
+    let mut balance = Amount::ZERO;
+    for txo in unspent_txos {
+      balance += txo.value;
+    }
+    Ok(balance)
+  }
 }
 
 #[graphql_object(rename_all = "none")]
-impl ScriptObject {
+impl<'r> ScriptObject<'r> {
   async fn balance(&self, height: Option<String>) -> anyhow::Result<String> {
     let balance = if let Some(height) = height {
       let height = BlockHeight::from_str(&height)?;
-      self.account_state.balance_history.as_ref().iter()
-        .filter(|SortedEntry { key, .. }| *key <= height)
-        .map(|SortedEntry { value, .. }| value)
-        .last()
-        .cloned()
-        .unwrap_or(Amount::ZERO)
+      let history = self.iterate_balance_history()?;
+      history.take_while(|(h, _)| *h <= height).map(|(_, balance)| balance).last().unwrap_or(Amount::ZERO)
     } else {
-      self.account_state.recent_balance
+      self.recent_balance()?
     };
 
     Ok(balance.to_sat().to_string())
   }
 
   async fn balance_history(&self) -> anyhow::Result<Vec<HistoricalBalance>> {
-    Ok(self.account_state.balance_history.as_ref().iter().map(|SortedEntry { key: height, value: amount }| HistoricalBalance {
-      height: *height,
-      balance: *amount,
+    Ok(self.iterate_balance_history()?.map(|(height, balance)| HistoricalBalance {
+      height,
+      balance,
     }).collect())
   }
 }

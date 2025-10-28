@@ -1,12 +1,11 @@
 mod batch;
-mod layer;
 mod fetch;
 
 use std::{convert::Infallible, sync::Arc};
 use futures::{StreamExt, TryStreamExt as _, stream};
 use tokio::{sync::mpsc, task::{block_in_place, spawn_blocking}};
 
-use crate::{fetch::{BlockFetcher, HashFetcher, HeaderFetcher}, scanner::{batch::Batch, fetch::{prefetch_block_headers, stream_blocks}, layer::Layer}, store::{self, block::BlockStoreRead as _, Store}};
+use crate::{fetch::{BlockFetcher, HashFetcher, HeaderFetcher}, scanner::{batch::Batch, fetch::{prefetch_block_headers, stream_blocks}}, store::{self, block::BlockStoreRead as _, Store}};
 
 
 pub struct Scanner<Fetcher> {
@@ -68,7 +67,7 @@ impl<Fetcher> Scanner<Fetcher> {
     };
 
     let batches = block_chunks.map(|blocks_heights| tokio::task::spawn_blocking(
-      move || tracing::trace_span!("building_batch").in_scope(|| {
+      move || tracing::trace_span!("batch").in_scope(|| {
         let blocks_heights = blocks_heights?;
         let start_height = blocks_heights.first().map(|(_, h)| *h).unwrap();
         let blocks = blocks_heights.into_iter().map(|(block, _)| block).collect();
@@ -83,19 +82,15 @@ impl<Fetcher> Scanner<Fetcher> {
 
       while let Some(batch) = batches.next().await.transpose()? {
         let batch = batch?;
-        let start_height = batch.start_height;
         let end_height = batch.end_height;
         let store = store.clone();
         spawn_blocking(move || {
-          tracing::trace_span!("processing_batch").in_scope(|| {
-            let mut tx = store::Batch {
-              store: &store,
-              batch: store.keyspace.batch(),
-            };
-            let layer = Layer::build(&mut tx, batch)?;
-            layer.write()?;
-            tracing::trace_span!("commit").in_scope(|| tx.batch.commit().map_err(|e| anyhow::format_err!("Failed to commit batch at height {}: {}", start_height, e)))
-          })
+          let mut tx = store::Batch {
+            store: &store,
+            batch: rocksdb::WriteBatch::default(),
+          };
+          tracing::trace_span!("write").in_scope(|| batch.write(&mut tx))?;
+          tracing::trace_span!("commit").in_scope(|| tx.commit())
         }).await??;
 
         println!("Scanned blocks up to {}", end_height);

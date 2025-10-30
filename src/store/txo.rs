@@ -1,22 +1,20 @@
 use bitcoin::{hashes::Hash, Amount, OutPoint, ScriptHash};
+use byten::{Decode, Decoder, Encode, Measure, prelude::{EncodeToVec, EncoderToVec as _}, var};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rocksdb::SliceTransform;
-use scroll::{pwrite_vec_with, Pread, Pwrite, SizeWith, BE};
-use scroll_derive::ActualSizeWith;
 
-use crate::{iter_util::IterExt, store::{remote::{AmountWrapper, OptionWrapper, OutPointWrapper, ScriptHashWrapper}, Batch, BlockHeight, Store}};
+use crate::{iter_util::IterExt, store::{Batch, BlockHeight, Store, codec::{AmountCodec, ScriptHashCodec, OutPointCodec}}};
 
 pub fn cf_descriptors(common_opts: &rocksdb::Options) -> Vec<rocksdb::ColumnFamilyDescriptor> {
   let mut outpoint_to_txo_opts = common_opts.clone();
   outpoint_to_txo_opts.set_merge_operator("txo_merge", |key, existing, operands| {
-    // let mut state: Option<TXOState> = existing.map(|v| bincode::decode_from_slice(v.as_ref(), BIN_VALUE).unwrap().0);
-    let mut state: Option<TXOState> = existing.map(|v| v.pread_with(0, BE).unwrap());
+    let mut state = existing.map(|v| TXOState::decode(v, &mut 0).unwrap());
     for op in operands {
-      let update: TXOUpdate = op.pread_with(0, BE).unwrap();
+      let update = TXOUpdate::decode(op, &mut 0).unwrap();
       match update {
         TXOUpdate::Generated(g) => {
           if let Some(ref state) = state {
-            let outpoint: OutPoint = (&key.pread_with::<OutPointWrapper>(0, BE).unwrap()).into();
+            let outpoint: OutPoint = OutPointCodec::Fix.decode(key, &mut 0).unwrap();
             if outpoint.vout != 0 {
               panic!("TXOGenerated update for existing TXOState at non-coinbase outpoint {}", outpoint);
             } if state.generated_height >= g.generated_height {
@@ -42,7 +40,7 @@ pub fn cf_descriptors(common_opts: &rocksdb::Options) -> Vec<rocksdb::ColumnFami
       }
     }
     let state = state.expect("no operands in TXO merge");
-    Some(pwrite_vec_with(&state, BE).unwrap())
+    Some(state.encode_to_vec().unwrap())
   }, |_key, _existing, _operands| None);
 
   let mut locker_script_hash_and_outpoint_opts = common_opts.clone();
@@ -67,21 +65,23 @@ pub fn cf_descriptors(common_opts: &rocksdb::Options) -> Vec<rocksdb::ColumnFami
   ]
 }
 
-#[derive(Copy, Clone, Pwrite, Pread, SizeWith)]
+#[derive(Copy, Clone, Encode, Decode, Measure)]
 pub struct TXOGenerated {
-  #[scroll(with = ScriptHashWrapper)]
+  #[byten(ScriptHashCodec)]
   pub locker_script_hash: ScriptHash,
-  #[scroll(with = AmountWrapper)]
+  #[byten(AmountCodec::Var)]
   pub value: Amount,
+  #[byten(var::U32BE)]
   pub generated_height: BlockHeight,
 }
 
-#[derive(Copy, Clone, Pwrite, Pread, SizeWith)]
+#[derive(Copy, Clone, Encode, Decode, Measure)]
 pub struct TXOSpent {
+  #[byten(var::U32BE)]
   pub spent_height: BlockHeight,
 }
 
-#[derive(Copy, Clone, Pwrite, Pread, ActualSizeWith)]
+#[derive(Copy, Clone, Encode, Decode, Measure)]
 #[repr(u8)]
 pub enum TXOUpdate {
   Generated(TXOGenerated) = 1,
@@ -114,7 +114,7 @@ impl TXOStoreRead for Store {
 
     let keys = outpoints
       .into_iter()
-      .map(|h| pwrite_vec_with(OutPointWrapper::from(h), BE).unwrap())
+      .map(|h| OutPointCodec::Fix.encode_to_vec(h).unwrap())
       .collect::<Vec<_>>();
 
     if !keys.is_sorted() {
@@ -128,7 +128,7 @@ impl TXOStoreRead for Store {
           let Some(value) = res? else {
             return Ok(None);
           };
-          Ok(Some(value.as_ref().pread_with(0, BE)?))
+          Ok(Some(TXOState::decode(value.as_ref(), &mut 0)?))
         })
     )
   }
@@ -142,9 +142,9 @@ impl TXOStoreRead for Store {
 
     let iter = self.db.prefix_iterator_cf(&cf, prefix);
     Ok(
-      iter.map(|res| -> anyhow::Result<LockerScriptHashAndOutpoint> {
+      iter.map(|res| -> anyhow::Result<_> {
         let (key, _value) = res?;
-        Ok(key.as_ref().pread_with(0, BE)?)
+        Ok(LockerScriptHashAndOutpoint::decode(key.as_ref(), &mut 0)?)
       })
       .take_while({
         let locker_script_hash = locker_script_hash.clone();
@@ -169,16 +169,16 @@ impl TXOStoreWrite for Batch<'_> {
     let entries = entries
       .into_par_iter()
       .map(|(outpoint, generated)| {
-        let key_outpoint_to_txo_state = pwrite_vec_with(OutPointWrapper::from(outpoint), BE).unwrap();
-        let value = pwrite_vec_with(TXOUpdate::Generated(generated.clone()), BE).unwrap();
-        let key_locker_script_hash_and_outpoint = pwrite_vec_with(LockerScriptHashAndOutpoint {
+        let key_outpoint_to_txo_state = OutPointCodec::Fix.encode_to_vec(outpoint).unwrap();
+        let value = TXOUpdate::Generated(generated.clone()).encode_to_vec().unwrap();
+        let key_locker_script_hash_and_outpoint = LockerScriptHashAndOutpoint {
           locker_script_hash: generated.locker_script_hash,
           outpoint: *outpoint,
-        }, BE).unwrap();
-        let key_generated_height_and_outpoint = pwrite_vec_with(GeneratedHeightAndOutPoint {
+        }.encode_to_vec().unwrap();
+        let key_generated_height_and_outpoint = GeneratedHeightAndOutPoint {
           generated_height: generated.generated_height,
           outpoint: *outpoint,
-        }, BE).unwrap();
+        }.encode_to_vec().unwrap();
         (key_outpoint_to_txo_state, value, key_locker_script_hash_and_outpoint, key_generated_height_and_outpoint)
       })
       .collect_vec_list()
@@ -198,12 +198,12 @@ impl TXOStoreWrite for Batch<'_> {
     let entries = entries
       .into_par_iter()
       .map(|(outpoint, spent)| {
-        let key_outpoint_to_txo_state = pwrite_vec_with(OutPointWrapper::from(outpoint), BE).unwrap();
-        let value = pwrite_vec_with(TXOUpdate::Spent(spent.clone()), BE).unwrap();
-        let key_spent_height_and_outpoint = pwrite_vec_with(SpentHeightAndOutPoint {
+        let key_outpoint_to_txo_state = OutPointCodec::Fix.encode_to_vec(outpoint).unwrap();
+        let value = TXOUpdate::Spent(spent.clone()).encode_to_vec().unwrap();
+        let key_spent_height_and_outpoint = SpentHeightAndOutPoint {
           spent_height: spent.spent_height,
           outpoint: *outpoint,
-        }, BE).unwrap();
+        }.encode_to_vec().unwrap();
         (key_outpoint_to_txo_state, value, key_spent_height_and_outpoint)
       })
       .collect_vec_list()
@@ -217,35 +217,38 @@ impl TXOStoreWrite for Batch<'_> {
   }
 }
 
-#[derive(Clone, Copy, Pread, Pwrite, ActualSizeWith)]
+#[derive(Clone, Copy, Encode, Decode, Measure)]
 pub struct TXOState {
-  #[scroll(with = ScriptHashWrapper)]
+  #[byten(ScriptHashCodec)]
   pub locker_script_hash: ScriptHash,
-  #[scroll(with = AmountWrapper)]
+  #[byten(AmountCodec::Var)]
   pub value: Amount,
+  #[byten(var::U32BE)]
   pub generated_height: BlockHeight,
-  #[scroll(with = OptionWrapper<_>)]
+  #[byten(var::Option::<var::U32BE>::default())]
   pub spent_height: Option<BlockHeight>,
 }
 
-#[derive(Pread, Pwrite, SizeWith)]
+#[derive(Encode, Decode, Measure)]
 pub struct SpentHeightAndOutPoint {
+  #[byten(var::U32BE)]
   pub spent_height: BlockHeight,
-  #[scroll(with = OutPointWrapper)]
+  #[byten(OutPointCodec::Fix)]
   pub outpoint: OutPoint,
 }
 
-#[derive(Pread, Pwrite, SizeWith)]
+#[derive(Encode, Decode, Measure)]
 pub struct GeneratedHeightAndOutPoint {
+  #[byten(var::U32BE)]
   pub generated_height: BlockHeight,
-  #[scroll(with = OutPointWrapper)]
+  #[byten(OutPointCodec::Fix)]
   pub outpoint: OutPoint,
 }
 
-#[derive(Pread, Pwrite, SizeWith)]
+#[derive(Encode, Decode, Measure)]
 pub struct LockerScriptHashAndOutpoint {
-  #[scroll(with = ScriptHashWrapper)]
+  #[byten(ScriptHashCodec)]
   pub locker_script_hash: ScriptHash,
-  #[scroll(with = OutPointWrapper)]
+  #[byten(OutPointCodec::Fix)]
   pub outpoint: OutPoint,
 }

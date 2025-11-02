@@ -1,5 +1,5 @@
 use bitcoin::{hashes::Hash, Amount, OutPoint, ScriptHash};
-use byten::{Decode, Decoder, Encode, Measure, prelude::{EncodeToVec, EncoderToVec as _}, var};
+use byten::{Decode, DecodeOwned, Decoder, DefaultCodec, Encode, EncodeToVec as _, EncoderToVec as _, Measure};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rocksdb::SliceTransform;
 
@@ -65,23 +65,23 @@ pub fn cf_descriptors(common_opts: &rocksdb::Options) -> Vec<rocksdb::ColumnFami
   ]
 }
 
-#[derive(Copy, Clone, Encode, Decode, Measure)]
+#[derive(Copy, Clone, DefaultCodec, Encode, DecodeOwned, Measure)]
 pub struct TXOGenerated {
-  #[byten(ScriptHashCodec)]
+  #[byten({ ScriptHashCodec })]
   pub locker_script_hash: ScriptHash,
-  #[byten(AmountCodec::Var)]
+  #[byten({ AmountCodec::Var })]
   pub value: Amount,
-  #[byten(var::U32BE)]
+  #[byten($uvarbe)]
   pub generated_height: BlockHeight,
 }
 
-#[derive(Copy, Clone, Encode, Decode, Measure)]
+#[derive(Copy, Clone, DefaultCodec, Encode, DecodeOwned, Measure)]
 pub struct TXOSpent {
-  #[byten(var::U32BE)]
+  #[byten($uvarbe)]
   pub spent_height: BlockHeight,
 }
 
-#[derive(Copy, Clone, Encode, Decode, Measure)]
+#[derive(Copy, Clone, DefaultCodec, Encode, DecodeOwned, Measure)]
 #[repr(u8)]
 pub enum TXOUpdate {
   Generated(TXOGenerated) = 1,
@@ -217,38 +217,38 @@ impl TXOStoreWrite for Batch<'_> {
   }
 }
 
-#[derive(Clone, Copy, Encode, Decode, Measure)]
+#[derive(Clone, Copy, DefaultCodec, Encode, DecodeOwned, Measure)]
 pub struct TXOState {
-  #[byten(ScriptHashCodec)]
+  #[byten({ ScriptHashCodec })]
   pub locker_script_hash: ScriptHash,
-  #[byten(AmountCodec::Var)]
+  #[byten({ AmountCodec::Var })]
   pub value: Amount,
-  #[byten(var::U32BE)]
+  #[byten($uvarbe)]
   pub generated_height: BlockHeight,
-  #[byten(var::Option::<var::U32BE>::default())]
+  #[byten(u32 $uvarbe $opt)]
   pub spent_height: Option<BlockHeight>,
 }
 
-#[derive(Encode, Decode, Measure)]
+#[derive(DefaultCodec, Encode, DecodeOwned, Measure)]
 pub struct SpentHeightAndOutPoint {
-  #[byten(var::U32BE)]
+  #[byten($uvarbe)]
   pub spent_height: BlockHeight,
-  #[byten(OutPointCodec::Fix)]
+  #[byten({ OutPointCodec::Fix })]
   pub outpoint: OutPoint,
 }
 
-#[derive(Encode, Decode, Measure)]
+#[derive(DefaultCodec, Encode, DecodeOwned, Measure)]
 pub struct GeneratedHeightAndOutPoint {
-  #[byten(var::U32BE)]
+  #[byten($uvarbe)]
   pub generated_height: BlockHeight,
-  #[byten(OutPointCodec::Fix)]
+  #[byten({ OutPointCodec::Fix })]
   pub outpoint: OutPoint,
 }
 
-#[derive(Encode, Decode, Measure)]
+#[derive(DefaultCodec, Encode, DecodeOwned, Measure)]
 pub struct LockerScriptHashAndOutpoint {
-  #[byten(ScriptHashCodec)]
+  #[byten({ ScriptHashCodec })]
   pub locker_script_hash: ScriptHash,
-  #[byten(OutPointCodec::Fix)]
+  #[byten({ OutPointCodec::Fix })]
   pub outpoint: OutPoint,
 }
